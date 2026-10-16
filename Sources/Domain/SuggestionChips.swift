@@ -80,28 +80,30 @@ public enum SuggestionChips {
     /// `discovery_track_analysis` side table — one cheap aggregate query, no
     /// object graph.
     public static func summary(library: LibraryStore) async -> LibraryDescriptorSummary {
-        let rows = (try? library.dbQueue.read { db in
-            try Row.fetchAll(db, sql: """
+        let summary = try? await library.dbQueue.read { db -> LibraryDescriptorSummary in
+            // Row is not Sendable, so reduce it to the Sendable summary inside the read.
+            let rows = try Row.fetchAll(db, sql: """
                 SELECT t.durationSec AS durationSec, a.bpm AS bpm,
                        a.energy AS energy, a.key AS camelot
                 FROM track t LEFT JOIN discovery_track_analysis a ON a.trackId = t.id
                 """)
-        }) ?? []
-        var bpm: [Double] = []
-        bpm.reserveCapacity(rows.count)
-        var energy: [Double] = []
-        energy.reserveCapacity(rows.count)
-        var duration: [Double] = []
-        duration.reserveCapacity(rows.count)
-        var counts: [String: Int] = [:]
-        for row in rows {
-            if let value: Double = row["bpm"] { bpm.append(value) }
-            if let value: Double = row["energy"] { energy.append(value) }
-            if let value: Double = row["durationSec"] { duration.append(value) }
-            if let key: String = row["camelot"] { counts[key, default: 0] += 1 }
+            var bpm: [Double] = []
+            bpm.reserveCapacity(rows.count)
+            var energy: [Double] = []
+            energy.reserveCapacity(rows.count)
+            var duration: [Double] = []
+            duration.reserveCapacity(rows.count)
+            var counts: [String: Int] = [:]
+            for row in rows {
+                if let value: Double = row["bpm"] { bpm.append(value) }
+                if let value: Double = row["energy"] { energy.append(value) }
+                if let value: Double = row["durationSec"] { duration.append(value) }
+                if let key: String = row["camelot"] { counts[key, default: 0] += 1 }
+            }
+            return LibraryDescriptorSummary(bpm: bpm, energy: energy,
+                                            durationSec: duration, camelotCounts: counts)
         }
-        return LibraryDescriptorSummary(bpm: bpm, energy: energy,
-                                        durationSec: duration, camelotCounts: counts)
+        return summary ?? LibraryDescriptorSummary(bpm: [], energy: [], durationSec: [], camelotCounts: [:])
     }
 
     private static func median(_ values: [Double]) -> Double? {

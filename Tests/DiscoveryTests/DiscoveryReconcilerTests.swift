@@ -423,12 +423,13 @@ final class DiscoveryReconcilerTests: XCTestCase {
         let backfilled = await reconciler.backfillRemoteNodeReferences { _ in provider }
         XCTAssertEqual(backfilled, 1)
 
-        let row = try queue.read { db in
-            try Row.fetchOne(db, sql: "SELECT remoteNodeID, remoteNodePath FROM asset WHERE id = ?",
+        let row = try await queue.read { db -> [String?] in
+            let row = try Row.fetchOne(db, sql: "SELECT remoteNodeID, remoteNodePath FROM asset WHERE id = ?",
                 arguments: [assetID])!
+            return [row["remoteNodeID"], row["remoteNodePath"]]
         }
-        XCTAssertEqual(row["remoteNodeID"] as String?, "node-1")
-        XCTAssertEqual(row["remoteNodePath"] as String?, "/music/song1.mp3")
+        XCTAssertEqual(row[0], "node-1")
+        XCTAssertEqual(row[1], "/music/song1.mp3")
     }
 
     func testBackfillDoesNothingWhenRemoteIndexingIsDisabled() async throws {
@@ -528,11 +529,12 @@ final class DiscoveryReconcilerTests: XCTestCase {
         }
         XCTAssertEqual(backfilled, 1)
 
-        let row = try queue.read { db in
-            try Row.fetchOne(db, sql: "SELECT remoteNodeID, remoteNodePath FROM asset WHERE id = ?",
+        let row = try await queue.read { db -> [String?] in
+            let row = try Row.fetchOne(db, sql: "SELECT remoteNodeID, remoteNodePath FROM asset WHERE id = ?",
                 arguments: [assetID])!
+            return [row["remoteNodeID"], row["remoteNodePath"]]
         }
-        XCTAssertEqual(row["remoteNodeID"] as String?, "https://archive.org/download/some-item/track01.mp3")
-        XCTAssertEqual(row["remoteNodePath"] as String?, "https://archive.org/download/some-item/track01.mp3")
+        XCTAssertEqual(row[0], "https://archive.org/download/some-item/track01.mp3")
+        XCTAssertEqual(row[1], "https://archive.org/download/some-item/track01.mp3")
     }
 }

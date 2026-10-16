@@ -113,7 +113,7 @@ public actor DiscoveryReconciler {
     public func pruneJobsForUndownloadedTracks() async throws -> Int {
         var pruned = 0
         while true {
-            let batch = try writer.read { db in
+            let batch: [(jobId: String, trackId: Int64)] = try await writer.read { db in
                 try Row.fetchAll(
                     db,
                     sql: """
@@ -123,11 +123,12 @@ public actor DiscoveryReconciler {
                         LIMIT ?
                         """,
                     arguments: [pipelineVersion, DiscoveryJobState.waitingForAsset.rawValue,
-                        Self.bootstrapPageSize])
+                        Self.bootstrapPageSize]
+                ).map { (jobId: $0["jobId"], trackId: $0["trackId"]) }
             }
             if batch.isEmpty { break }
 
-            let trackIds = batch.map { $0["trackId"] as Int64 }
+            let trackIds = batch.map(\.trackId)
             let assetsByTrack = try await writer.read { db in
                 try Asset.filter(trackIds.contains(Column("trackId"))).fetchAll(db)
             }.reduce(into: [Int64: [Asset]]()) { result, asset in
@@ -140,8 +141,7 @@ public actor DiscoveryReconciler {
             // launch would delete and immediately recreate the same jobs.
             let remoteEnabled = await remoteIndexingEnabled()
             let idsToDelete: [String] = batch.compactMap { row in
-                let trackId: Int64 = row["trackId"]
-                let assets = assetsByTrack[trackId] ?? []
+                let assets = assetsByTrack[row.trackId] ?? []
                 // No asset rows at all is a different, still-eligible case
                 // (a local import still writing its asset) — only prune
                 // when every asset that DOES exist is remote/undownloaded
@@ -150,7 +150,7 @@ public actor DiscoveryReconciler {
                     !(remoteEnabled
                         && DiscoveryReconciler.remoteSparseEligibleAsset(from: assets) != nil)
                 else { return nil }
-                return row["jobId"] as String
+                return row.jobId
             }
             guard !idsToDelete.isEmpty else {
                 // Nothing in this batch qualified; a batch this size never
@@ -393,7 +393,7 @@ public actor DiscoveryReconciler {
             let sizeBytes: Int64?
             let remoteURL: String?
         }
-        let candidates: [Candidate] = ((try? writer.read { db in
+        let candidates: [Candidate] = (try? await writer.read { db in
             try Row.fetchAll(
                 db,
                 sql: """
@@ -404,11 +404,11 @@ public actor DiscoveryReconciler {
                     WHERE a.kind = ? AND a.remoteNodePath IS NULL
                       AND a.unsupportedReason IS NULL AND a.needsReimport = 0
                     """,
-                arguments: [AssetKind.remote.rawValue])
-        }) ?? []).map { row in
-            Candidate(assetId: row["assetId"], sourceId: row["sourceId"],
-                title: row["title"], sizeBytes: row["sizeBytes"], remoteURL: row["remoteURL"])
-        }
+                arguments: [AssetKind.remote.rawValue]).map { row in
+                Candidate(assetId: row["assetId"], sourceId: row["sourceId"],
+                    title: row["title"], sizeBytes: row["sizeBytes"], remoteURL: row["remoteURL"])
+            }
+        }) ?? []
         guard !candidates.isEmpty else { return 0 }
 
         var backfilled = 0
