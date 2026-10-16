@@ -73,6 +73,11 @@ jobs:
           retention-days: 7
 
   testflight-build:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
@@ -330,6 +335,17 @@ jobs:
             --file output/Tonearm.ipa \
             --apiKey "$APPSTORE_API_KEY_ID" \
             --apiIssuer "$APPSTORE_API_ISSUER_ID"
+
+      - name: Record TestFlight delivery
+        if: success() && env.HAS_TESTFLIGHT_SECRETS == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CLAUDE_WORKFLOW_TOKEN || github.token }}
+          APP_NAME: Tonearm
+          ARCHIVED_APP: ./build/Tonearm.xcarchive/Products/Applications/Tonearm.app
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          ASC_KEY_PATH: /Users/runner/.appstoreconnect/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
+        run: bash .github/scripts/record-testflight-delivery.sh
 
       - name: Upload Build Log on Failure
         if: failure() && env.HAS_TESTFLIGHT_SECRETS == 'true'
