@@ -58,6 +58,7 @@ extension AudioPlayer {
     /// the player instance.
     func observeTimeControlStatus() {
         timeControlCancellable = player.publisher(for: \.timeControlStatus)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }

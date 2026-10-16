@@ -281,6 +281,9 @@ extension AudioPlayer {
         // print-based debugging of this exact bug has never captured yet.
         let trackTitle = currentTrack?.track.title ?? "?"
         itemStatusCancellable = item.publisher(for: \.status)
+            // KVO fires on an AVFoundation queue; this closure is main-actor isolated
+            // (Swift 6), so it must be delivered on the main queue or the runtime traps.
+            .receive(on: DispatchQueue.main)
             .sink { status in
                 loadingLog.notice("replaceItem: status change for \"\(trackTitle, privacy: .public)\" -> \(String(describing: status), privacy: .public), error=\(String(describing: item.error), privacy: .public)")
             }
