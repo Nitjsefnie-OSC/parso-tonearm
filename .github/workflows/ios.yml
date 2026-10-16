@@ -20,7 +20,6 @@ env:
 jobs:
   test:
     runs-on: macos-latest
-    concurrency: { group: cadence-macos, cancel-in-progress: false, queue: max }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,7 +80,6 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
-    concurrency: { group: cadence-macos, cancel-in-progress: false, queue: max }
     steps:
       - name: Check TestFlight Signing Configuration
         env:
