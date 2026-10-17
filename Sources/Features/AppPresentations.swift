@@ -64,7 +64,7 @@ struct AppPresentations: ViewModifier {
                 Button("Keep paused") { player.resolveTransitionRecovery(reenable: false) }
                 Button("Re-enable") { player.resolveTransitionRecovery(reenable: true) }
             } message: {
-                Text("Tonearm was interrupted while setting up a transition, so \"Use for everything\" is off. Your queue and other settings are unchanged.")
+                Text("Platterhead was interrupted while setting up a transition, so \"Use for everything\" is off. Your queue and other settings are unchanged.")
             }
             .onChange(of: player.networkSkipMessage) { _, message in
                 guard message != nil else { return }
