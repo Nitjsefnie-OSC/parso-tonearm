@@ -35,10 +35,7 @@ extension AudioPlayer {
     /// track (e.g. after shuffle reorders the queue), then repreloads.
     func invalidatePreloadedNext() {
         cancelCrossfade(resetVolume: true)
-        preloadedNextLoader?.shutdown()
-        preloadedNextItem = nil
-        preloadedNextTrackId = nil
-        preloadedNextLoader = nil
+        dropPreloadedNext()
         preloadNextItem()
         mixDecks?.upcomingChanged()
     }

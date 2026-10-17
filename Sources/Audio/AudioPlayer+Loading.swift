@@ -8,6 +8,25 @@ import OSLog
 
 private let loadingLog = Logger(subsystem: "guru.parso.tonearm", category: "Playback")
 
+private let localLog = Logger(subsystem: "guru.parso.tonearm", category: "LocalMedia")
+
+/// An item for an imported local file. It owns the scoped-access lease, so
+/// access lasts exactly as long as AVFoundation can use the item and is
+/// released when the item is replaced, discarded or invalidated.
+final class LocalPlayerItem: AVPlayerItem {
+    private let lease: SecurityScopedAssetLease?
+    let backing: ResolvedLocalAsset.Backing
+
+    init(url: URL, lease: SecurityScopedAssetLease?, backing: ResolvedLocalAsset.Backing) {
+        self.lease = lease
+        self.backing = backing
+        super.init(asset: AVURLAsset(url: url), automaticallyLoadedAssetKeys: nil)
+    }
+
+    /// Ends scoped access now (idempotent). The lease also releases on deinit.
+    func releaseLease() { lease?.release() }
+}
+
 extension AudioPlayer {
     // MARK: - Loading
 
@@ -54,6 +73,7 @@ extension AudioPlayer {
         if let preItem = preloadedNextItem, preloadedNextTrackId == row.track.id {
             built = (preItem, preloadedNextLoader)
         } else {
+            lastLocalFailure = nil
             built = buildItem(for: asset)
         }
         // TEMPORARY diagnostic — real, repeated report ("I click on a track
@@ -64,6 +84,11 @@ extension AudioPlayer {
         preloadedNextTrackId = nil
         preloadedNextLoader = nil
 
+        if built == nil, let failure = lastLocalFailure {
+            lastLocalFailure = nil
+            failLocalPlayback(failure)
+            return
+        }
         guard let built else {
             loadingLog.error("loadCurrent: buildItem(for:) returned nil for track \(row.track.id ?? -1, privacy: .public) \"\(row.track.title, privacy: .public)\" (asset kind \(asset.kind.rawValue, privacy: .public), remoteURL=\(asset.remoteURL ?? "nil", privacy: .public)) — skipping to next")
             next()
@@ -138,14 +163,45 @@ extension AudioPlayer {
             let loader = CachingResourceLoader(originalURL: remote, store: AudioCache.shared, config: AudioCache.loaderConfig(headers: asset.transientRemoteHeaders))
             avAsset.resourceLoader.setDelegate(loader, queue: loaderQueue)
             return (AVPlayerItem(asset: avAsset), loader)
-        } else if let bookmark = asset.bookmark, let (url, _) = BookmarkVault.resolve(bookmark) {
-            _ = url.startAccessingSecurityScopedResource()
-            return (AVPlayerItem(url: url), nil)
-        } else if let rel = asset.relPath {
-            let url = managedURL(rel)
-            return (AVPlayerItem(url: url), nil)
+        } else if asset.bookmark != nil || asset.relPath != nil {
+            do {
+                let resolved = try localResolver.resolve(asset)
+                localLog.notice("local item resolved backing=\(resolved.backing.rawValue, privacy: .public) stale=\(resolved.bookmarkWasStale, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public)")
+                return (LocalPlayerItem(url: resolved.url, lease: resolved.lease, backing: resolved.backing), nil)
+            } catch {
+                lastLocalFailure = error
+                localLog.error("local item unavailable class=\(error.logClass, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public)")
+                return nil
+            }
         }
         return nil
+    }
+
+    /// Controlled stop for a local item that cannot play: leaves the player idle
+    /// (releasing the item and its scoped-access lease) and tells the user why.
+    func failLocalPlayback(_ failure: LocalMediaFailure) {
+        localReadinessTask?.cancel()
+        itemStatusCancellable = nil
+        player.pause()
+        (player.currentItem as? LocalPlayerItem)?.releaseLease()
+        player.replaceCurrentItem(with: nil)
+        isPlaying = false
+        currentTime = 0
+        networkSkipMessage = failure.userMessage
+        updateNowPlaying()
+    }
+
+    private func watchLocalReadiness(of item: LocalPlayerItem) {
+        let started = ContinuousClock.now
+        let timeout = localReadinessTimeout
+        localReadinessTask?.cancel()
+        localReadinessTask = Task { @MainActor [weak self, weak item] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self, let item,
+                  self.player.currentItem === item, item.status == .unknown else { return }
+            localLog.error("local readiness timeout elapsed=\(String(describing: ContinuousClock.now - started), privacy: .public) backing=\(item.backing.rawValue, privacy: .public)")
+            self.failLocalPlayback(.readinessTimeout)
+        }
     }
 
     /// AVFoundation cannot infer a media type from Jamendo's extensionless
@@ -259,6 +315,15 @@ extension AudioPlayer {
         preloadedNextLoader = built.loader
     }
 
+    /// Discards the preloaded next item (and its scoped-access lease) without playing it.
+    func dropPreloadedNext() {
+        preloadedNextLoader?.shutdown()
+        (preloadedNextItem as? LocalPlayerItem)?.releaseLease()
+        preloadedNextItem = nil
+        preloadedNextTrackId = nil
+        preloadedNextLoader = nil
+    }
+
     func upcomingQueueIndex() -> Int? {
         guard !queue.isEmpty, !isAmbient, repeatMode != .one else { return nil }
         if index < queue.count - 1 { return index + 1 }
@@ -273,7 +338,9 @@ extension AudioPlayer {
     }
 
     func replaceItem(_ item: AVPlayerItem) {
+        let outgoing = player.currentItem
         player.replaceCurrentItem(with: item)
+        if outgoing !== item { (outgoing as? LocalPlayerItem)?.releaseLease() }
         loadedSourceSampleRate = 0
         // TEMPORARY diagnostic — see loadCurrent's matching comment. Logs
         // every status transition (unknown -> readyToPlay/failed) and the
@@ -284,15 +351,27 @@ extension AudioPlayer {
             // KVO fires on an AVFoundation queue; this closure is main-actor isolated
             // (Swift 6), so it must be delivered on the main queue or the runtime traps.
             .receive(on: DispatchQueue.main)
-            .sink { status in
-                loadingLog.notice("replaceItem: status change for \"\(trackTitle, privacy: .public)\" -> \(String(describing: status), privacy: .public), error=\(String(describing: item.error), privacy: .public)")
+            .sink { [weak self, weak item] status in
+                if let self, let local = item as? LocalPlayerItem, self.player.currentItem === local {
+                    switch status {
+                    case .readyToPlay:
+                        self.localReadinessTask?.cancel()
+                        localLog.notice("local item ready backing=\(local.backing.rawValue, privacy: .public)")
+                    case .failed:
+                        localLog.error("local item failed backing=\(local.backing.rawValue, privacy: .public)")
+                        self.failLocalPlayback(.unreadableMedia)
+                        return
+                    default: break
+                    }
+                }
+                loadingLog.notice("replaceItem: status change for \"\(trackTitle, privacy: .public)\" -> \(String(describing: status), privacy: .public), error=\(String(describing: item?.error), privacy: .public)")
             }
         // Drop EQ taps for items no longer in play (the outgoing current item,
         // and any preloaded item that wasn't the one we advanced to).
         eqTap?.prune(keeping: [item, preloadedNextItem].compactMap { $0 })
         let asset = item.asset
-        Task { @MainActor [weak self, asset, item] in
-            guard let self,
+        Task { @MainActor [weak self, asset, weak item] in
+            guard let self, let item,
                   self.player.currentItem === item,
                   let audioTracks = try? await asset.loadTracks(withMediaType: .audio),
                   let audioTrack = audioTracks.first,
@@ -305,6 +384,7 @@ extension AudioPlayer {
                 }
             }
         }
+        if let local = item as? LocalPlayerItem { watchLocalReadiness(of: local) } else { localReadinessTask?.cancel() }
         observeEnd(of: item)
     }
 

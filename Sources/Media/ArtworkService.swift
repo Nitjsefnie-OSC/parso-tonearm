@@ -450,22 +450,10 @@ actor ArtworkService {
     /// a single metadata pass.
     private func loadLocalFile(asset: Asset) async
         -> (image: PlatformImage?, artist: String?, album: String?, title: String?) {
-        let url: URL?
-        if let bookmark = asset.bookmark, let (resolved, _) = BookmarkVault.resolve(bookmark) {
-            url = resolved
-        } else if let rel = asset.relPath {
-            let base = try? FileManager.default.url(for: .applicationSupportDirectory,
-                                                    in: .userDomainMask, appropriateFor: nil, create: true)
-            url = base?.appendingPathComponent(rel)
-        } else {
-            url = nil
-        }
-
-        guard let fileURL = url else { return (nil, nil, nil, nil) }
-
-        let needsScopedAccess = asset.bookmark != nil
-        if needsScopedAccess { _ = fileURL.startAccessingSecurityScopedResource() }
-        defer { if needsScopedAccess { fileURL.stopAccessingSecurityScopedResource() } }
+        // The lease is local to this call, so it never touches the player's own scope.
+        guard let resolved = try? LocalAssetResolver.live.resolve(asset) else { return (nil, nil, nil, nil) }
+        let fileURL = resolved.url
+        defer { resolved.lease?.release() }
 
         let avAsset = AVURLAsset(url: fileURL)
         guard let metadata = try? await avAsset.load(.commonMetadata) else {

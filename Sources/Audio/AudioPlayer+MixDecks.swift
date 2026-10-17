@@ -45,10 +45,7 @@ extension AudioPlayer: MixDeckHost {
         guard let mixDecks else { return false }
         cancelCrossfade(resetVolume: true)
         shutdownLoaders()
-        preloadedNextLoader?.shutdown()
-        preloadedNextItem = nil
-        preloadedNextTrackId = nil
-        preloadedNextLoader = nil
+        dropPreloadedNext()
         player.pause()
         player.replaceCurrentItem(with: nil)
         transitionPlan = nil
