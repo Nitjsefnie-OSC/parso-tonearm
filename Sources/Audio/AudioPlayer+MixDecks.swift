@@ -48,6 +48,8 @@ extension AudioPlayer: MixDeckHost {
         dropPreloadedNext()
         player.pause()
         player.replaceCurrentItem(with: nil)
+        isOutgoingTransitionTailAudible = false
+        deferredTransitionPlan = nil
         transitionPlan = nil
 
         mixDecks.volume = outputLevel
@@ -78,6 +80,8 @@ extension AudioPlayer: MixDeckHost {
         guard let mixDecks else { return }
         mixDecks.stop()
         self.mixDecks = nil
+        isOutgoingTransitionTailAudible = false
+        deferredTransitionPlan = nil
         transitionPlan = nil
         transitionPrepState = .ready
     }
@@ -136,6 +140,10 @@ extension AudioPlayer: MixDeckHost {
         } else {
             return scheduledIndex
         }
+        // A blend hands over while the outgoing track is still audible: keep showing A→B.
+        if let plan = transitionPlan, plan.toTrackID == trackID, plan.style != .gapless {
+            isOutgoingTransitionTailAudible = true
+        }
         index = newIndex
         let row = queue[newIndex]
         duration = row.track.durationSec ?? trackDuration
@@ -184,8 +192,30 @@ extension AudioPlayer: MixDeckHost {
     }
 
     func mixDecksPublish(plan: TransitionPlan?, state: GridPrepState) {
+        if isOutgoingTransitionTailAudible {
+            deferredTransitionPlan = (plan, state)
+            return
+        }
         transitionPlan = plan
         transitionPrepState = state
+    }
+
+    func mixDecksOutgoingDidFinish() {
+        endOutgoingTransitionTail()
+    }
+
+    /// The outgoing track is inaudible (or the transition was cancelled): B→C may show now.
+    func endOutgoingTransitionTail() {
+        let deferred = deferredTransitionPlan
+        deferredTransitionPlan = nil
+        guard isOutgoingTransitionTailAudible || deferred != nil else { return }
+        isOutgoingTransitionTailAudible = false
+        if let deferred {
+            transitionPlan = deferred.plan
+            transitionPrepState = deferred.state
+        } else {
+            transitionPlan = nil
+        }
     }
 
     // MARK: - Sources
@@ -227,3 +257,15 @@ extension AudioPlayer: MixDeckHost {
     }
 }
 #endif
+
+extension AudioPlayer {
+    /// The displayed edge for the playing track: A→B until A is inaudible, then B→C.
+    public var transitionPresentation: TransitionPresentation {
+        if isAmbient || queue.isEmpty { return .none }
+        let hasNext = index + 1 < queue.count || repeatMode == .all
+        return TransitionPresentation.make(plan: transitionPlan, preparation: transitionPrepState,
+                                           hasNext: hasNext || isOutgoingTransitionTailAudible,
+                                           position: currentTime,
+                                           outgoingTail: isOutgoingTransitionTailAudible)
+    }
+}
