@@ -113,6 +113,8 @@ public final class AudioPlayer: ObservableObject {
     @Published public var queueSource: QueueSource = .none
     @Published public internal(set) var transitionPlan: TransitionPlan?
     @Published public internal(set) var transitionPrepState: GridPrepState = .ready
+    /// Set while an edge plays continuously because a smart blend was not admitted.
+    @Published public internal(set) var smartBlendFallback: TransitionFallbackStatus?
 
     /// Smart transitions is a playback setting, not just a Settings toggle.
     /// The app mirrors the preference here at launch and whenever the toggle

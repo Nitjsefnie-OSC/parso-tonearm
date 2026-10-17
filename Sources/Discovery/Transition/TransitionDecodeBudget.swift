@@ -1,4 +1,5 @@
 import Foundation
+import TonearmCore
 
 /// Transition prep decodes a whole track to float PCM before analysing it. libFLAC first decodes
 /// to 32-bit integers and that copy lives alongside the float buffer, so a 10-minute 96 kHz stereo
@@ -25,29 +26,10 @@ public enum TransitionDecodeBudget {
         guard let estimatedPeakBytes, let availableBytes else { return true }
         return estimatedPeakBytes <= availableBytes / 2
     }
-}
 
-/// Runs full-track decodes one at a time across the whole app. Cancelling a prep task can't stop
-/// a decode that has started (it's synchronous C), so without this a re-prepared queue stacked
-/// decodes on top of each other. A queued decode that was cancelled before its turn never starts.
-public actor TransitionDecodeGate {
-    public static let shared = TransitionDecodeGate()
-    private var tail: Task<Void, Never>?
-
-    public init() {}
-
-    public func run<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
-        let previous = tail
-        let work = Task.detached(priority: .utility) { () throws -> T in
-            await previous?.value
-            try Task.checkCancellation()
-            return try operation()
-        }
-        tail = Task { _ = try? await work.value }
-        return try await withTaskCancellationHandler {
-            try await work.value
-        } onCancel: {
-            work.cancel()
-        }
+    /// Preview and live playback share one decision (`TransitionAdmissionController`).
+    public static func admission(outgoing: TransitionTrackMetadata?, incoming: TransitionTrackMetadata?,
+                                 system: TransitionSystemState = .current()) -> TransitionAdmissionDecision {
+        TransitionAdmissionController.decide(outgoing: outgoing, incoming: incoming, system: system)
     }
 }
