@@ -8,8 +8,25 @@ import AVFoundation
 import CoreImage
 import TonearmCore
 
+/// Tags plus an already-bounded cover thumbnail for one local file.
+struct LocalFileMetadata: Sendable {
+    var artwork: DownsampledArtwork?
+    var artist: String?
+    var album: String?
+    var title: String?
+}
+
 actor ArtworkService {
-    static let shared = ArtworkService()
+    static let shared: ArtworkService = {
+        let service = ArtworkService()
+        #if !os(macOS)
+        NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification,
+                                               object: nil, queue: nil) { _ in
+            Task { await ArtworkService.shared.purgeForMemoryWarning() }
+        }
+        #endif
+        return service
+    }()
 
     private let memCache: NSCache<NSString, PlatformImage> = {
         let c = NSCache<NSString, PlatformImage>()
@@ -59,7 +76,15 @@ actor ArtworkService {
         return URLSession(configuration: cfg)
     }()
 
-    private init() {}
+    typealias LocalFileLoader = @Sendable (Asset) async -> LocalFileMetadata?
+
+    private let localLoader: LocalFileLoader
+    private let localFlights = SingleFlight<LocalFileMetadata>()
+
+    private init() { localLoader = Self.liveLocalLoader }
+
+    /// Test seam: inject the metadata loader (no Files-provider grant needed).
+    init(localLoader: @escaping LocalFileLoader) { self.localLoader = localLoader }
 
     /// User setting (FR): when false, no external iTunes artwork lookups occur.
     private var artworkLookupEnabled = true
@@ -336,6 +361,7 @@ actor ArtworkService {
                 return (image, true)
             } else {
                 let local = await loadLocalFile(asset: asset)
+                if Task.isCancelled { return nil }
                 tagArtist = local.artist ?? tagArtist
                 tagAlbum = local.album ?? tagAlbum
                 tagTitle = local.title ?? tagTitle
@@ -446,40 +472,83 @@ actor ArtworkService {
         return (image, match.isStrong)
     }
 
-    /// Loads a local file's embedded artwork and common tags (artist/album/title) in
-    /// a single metadata pass.
-    private func loadLocalFile(asset: Asset) async
+    /// Single-flight entry point for local metadata + embedded artwork: every
+    /// surface (player, Now Playing, system playback, lists) joining the same
+    /// asset shares one `AVURLAsset` pass and one bounded artwork decode.
+    func loadLocalFile(asset: Asset) async
         -> (image: PlatformImage?, artist: String?, album: String?, title: String?) {
+        let key = "local-asset-\(asset.id ?? asset.trackId)"
+        let loader = localLoader
+        let result = await localFlights.value(for: key) { await loader(asset) }
+        // A cancelled caller must not publish a stale result into caches/UI.
+        guard let result, !Task.isCancelled else { return (nil, nil, nil, nil) }
+        return (result.artwork.map { Self.platformImage(from: $0.image) }, result.artist, result.album, result.title)
+    }
+
+    /// Drops thumbnails and cancels in-flight local work on memory pressure.
+    func purgeForMemoryWarning() async {
+        memCache.removeAllObjects()
+        thumbnailMemCache.removeAllObjects()
+        await localFlights.cancelAll()
+        LocalPlaybackDiagnostics.shared.record(.memoryWarning, loadID: 0)
+    }
+
+    private static func platformImage(from cg: CGImage) -> PlatformImage {
+        #if os(macOS)
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        #else
+        return UIImage(cgImage: cg)
+        #endif
+    }
+
+    /// Live loader: scoped access for the duration of the pass only, metadata
+    /// via one `AVURLAsset`, embedded cover through the bounded downsampler.
+    static let liveLocalLoader: LocalFileLoader = { asset in
+        let diag = LocalPlaybackDiagnostics.shared
+        let id = diag.makeLoadID()
+        diag.record(.metadataStart, loadID: id)
         // The lease is local to this call, so it never touches the player's own scope.
-        guard let resolved = try? LocalAssetResolver.live.resolve(asset) else { return (nil, nil, nil, nil) }
-        let fileURL = resolved.url
+        guard let resolved = try? LocalAssetResolver.live.resolve(asset) else {
+            diag.record(.metadataError, loadID: id)
+            return LocalFileMetadata()
+        }
         defer { resolved.lease?.release() }
 
-        let avAsset = AVURLAsset(url: fileURL)
+        let avAsset = AVURLAsset(url: resolved.url)
         guard let metadata = try? await avAsset.load(.commonMetadata) else {
-            return (nil, nil, nil, nil)
+            diag.record(.metadataError, loadID: id)
+            return LocalFileMetadata()
         }
 
-        var image: PlatformImage?
-        var artist: String?
-        var album: String?
-        var title: String?
+        var result = LocalFileMetadata()
         for item in metadata {
+            if Task.isCancelled { diag.record(.cancelled, loadID: id); return nil }
             guard let commonKey = item.commonKey else { continue }
             switch commonKey {
             case .commonKeyArtwork:
-                if let data = try? await item.load(.dataValue) { image = PlatformImage(data: data) }
+                guard let data = try? await item.load(.dataValue) else { continue }
+                diag.record(.artworkDecodeStart, loadID: id, values: ["bytes": data.count])
+                if let art = EmbeddedArtworkDownsampler.downsample(data) {
+                    result.artwork = art
+                    diag.record(.artworkDecodeEnd, loadID: id, values: [
+                        "srcW": art.sourceWidth, "srcH": art.sourceHeight,
+                        "outW": art.image.width, "outH": art.image.height,
+                        "target": LocalArtworkLimits.maxThumbnailPixel])
+                } else {
+                    diag.record(.artworkRejected, loadID: id, values: ["bytes": data.count])
+                }
             case .commonKeyArtist:
-                artist = try? await item.load(.stringValue)
+                result.artist = try? await item.load(.stringValue)
             case .commonKeyAlbumName:
-                album = try? await item.load(.stringValue)
+                result.album = try? await item.load(.stringValue)
             case .commonKeyTitle:
-                title = try? await item.load(.stringValue)
+                result.title = try? await item.load(.stringValue)
             default:
                 break
             }
         }
-        return (image, artist, album, title)
+        diag.record(.metadataEnd, loadID: id)
+        return result
     }
 
     @MainActor
