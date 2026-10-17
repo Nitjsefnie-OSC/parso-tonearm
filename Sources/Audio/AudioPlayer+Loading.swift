@@ -164,12 +164,18 @@ extension AudioPlayer {
             avAsset.resourceLoader.setDelegate(loader, queue: loaderQueue)
             return (AVPlayerItem(asset: avAsset), loader)
         } else if asset.bookmark != nil || asset.relPath != nil {
+            let diag = LocalPlaybackDiagnostics.shared
+            let loadID = diag.makeLoadID()
+            diag.record(.resolveStart, loadID: loadID)
             do {
                 let resolved = try localResolver.resolve(asset)
+                diag.record(.resolveEnd, loadID: loadID)
+                diag.record(resolved.lease != nil ? .accessAcquired : .itemBuilt, loadID: loadID)
                 localLog.notice("local item resolved backing=\(resolved.backing.rawValue, privacy: .public) stale=\(resolved.bookmarkWasStale, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public)")
                 return (LocalPlayerItem(url: resolved.url, lease: resolved.lease, backing: resolved.backing), nil)
             } catch {
                 lastLocalFailure = error
+                diag.record(error == .accessDenied ? .accessDenied : .metadataError, loadID: loadID)
                 localLog.error("local item unavailable class=\(error.logClass, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public)")
                 return nil
             }
@@ -340,7 +346,10 @@ extension AudioPlayer {
     func replaceItem(_ item: AVPlayerItem) {
         let outgoing = player.currentItem
         player.replaceCurrentItem(with: item)
-        if outgoing !== item { (outgoing as? LocalPlayerItem)?.releaseLease() }
+        if outgoing !== item {
+            (outgoing as? LocalPlayerItem)?.releaseLease()
+            LocalPlaybackDiagnostics.shared.record(outgoing is LocalPlayerItem ? .accessReleased : .playerReplaced, loadID: 0)
+        }
         loadedSourceSampleRate = 0
         // TEMPORARY diagnostic — see loadCurrent's matching comment. Logs
         // every status transition (unknown -> readyToPlay/failed) and the
@@ -356,6 +365,7 @@ extension AudioPlayer {
                     switch status {
                     case .readyToPlay:
                         self.localReadinessTask?.cancel()
+                        LocalPlaybackDiagnostics.shared.record(.itemStatus, loadID: 0, values: ["status": status.rawValue])
                         localLog.notice("local item ready backing=\(local.backing.rawValue, privacy: .public)")
                     case .failed:
                         localLog.error("local item failed backing=\(local.backing.rawValue, privacy: .public)")
