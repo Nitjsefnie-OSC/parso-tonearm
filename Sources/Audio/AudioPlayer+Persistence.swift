@@ -199,6 +199,28 @@ extension AudioPlayer {
         await task.value
     }
 
+    /// Runs the sentinel check before restoration can choose mix decks. Once per player.
+    func applyLaunchRecovery() {
+        guard !launchRecoveryDone else { return }
+        launchRecoveryDone = true
+        let outcome = TransitionLaunchRecovery.run(store: transitionSafetyStore, defaults: .standard,
+                                                   clock: transitionSafetyClock)
+        plainRestoreAfterRecovery = outcome.plainPlayback
+        transitionRecoveryNoticePending = outcome.showsNotice
+        if outcome.plainPlayback { stopMixDecks() }
+    }
+
+    /// The listener's answer to the recovery notice. Re-enable turns only Everywhere back on.
+    public func resolveTransitionRecovery(reenable: Bool) {
+        if reenable {
+            TransitionLaunchRecovery.reenable(store: transitionSafetyStore, defaults: .standard)
+        } else {
+            TransitionLaunchRecovery.keepPaused(store: transitionSafetyStore)
+        }
+        plainRestoreAfterRecovery = false
+        transitionRecoveryNoticePending = false
+    }
+
     /// Resets the once-per-process restore guard so tests can re-run
     /// `restorePersistedQueue()` without restarting the process.
     /// Also clears the restore task so the next call can retry (F5 retry).
@@ -216,6 +238,7 @@ extension AudioPlayer {
     }
 
     internal func performQueueRestore() async {
+        applyLaunchRecovery()
         guard queue.isEmpty, !isAmbient else { return }
         guard let saved = await persistor.loadBest(), !saved.trackIDs.isEmpty else { return }
 

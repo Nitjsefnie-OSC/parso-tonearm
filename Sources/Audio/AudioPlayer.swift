@@ -156,6 +156,16 @@ public final class AudioPlayer: ObservableObject {
     var lastLocalFailure: LocalMediaFailure?
     var restoreTask: Task<Void, Never>?
     var isRestoring = false
+    /// Where the transition-risk sentinel lives; tests point it at a temp file.
+    var transitionSafetyStore = TransitionSafetyStateStore.default
+    var transitionSafetyClock = TransitionSafetyClock.system
+    private(set) lazy var transitionSafety = TransitionSafetyMonitor(store: transitionSafetyStore,
+                                                                     clock: transitionSafetyClock)
+    /// Set by launch recovery: the restore after an interrupted transition setup plays on AVPlayer.
+    var plainRestoreAfterRecovery = false
+    var launchRecoveryDone = false
+    /// Drives the one-time "Smart transitions were paused" notice.
+    @Published public internal(set) var transitionRecoveryNoticePending = false
     var pendingRestoreSeek: Double?
     /// Injectable persistence funnel: tests can swap in fakes/spies.
     public var persistor = PlaybackPositionPersistor()

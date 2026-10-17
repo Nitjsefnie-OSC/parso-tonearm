@@ -58,6 +58,14 @@ struct AppPresentations: ViewModifier {
                 AddFolderSheet(folderURL: url, folderBookmark: appState.pickedFolderBookmark)
                     .macSheetFrame(minWidth: 460, minHeight: 420)
             }
+            .alert("Smart transitions were paused to keep playback reliable.",
+                   isPresented: Binding(get: { player.transitionRecoveryNoticePending && appState.didOnboard },
+                                        set: { _ in })) {
+                Button("Keep paused") { player.resolveTransitionRecovery(reenable: false) }
+                Button("Re-enable") { player.resolveTransitionRecovery(reenable: true) }
+            } message: {
+                Text("Tonearm was interrupted while setting up a transition, so \"Use for everything\" is off. Your queue and other settings are unchanged.")
+            }
             .onChange(of: player.networkSkipMessage) { _, message in
                 guard message != nil else { return }
                 Task {
