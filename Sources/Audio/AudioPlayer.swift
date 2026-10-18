@@ -168,7 +168,7 @@ public final class AudioPlayer: ObservableObject {
     private(set) lazy var transitionSafety = TransitionSafetyMonitor(store: transitionSafetyStore,
                                                                      clock: transitionSafetyClock)
     /// Set by launch recovery: the restore after an interrupted transition setup plays on AVPlayer.
-    var plainRestoreAfterRecovery = false
+    public internal(set) var plainRestoreAfterRecovery = false
     var launchRecoveryDone = false
     /// Drives the one-time "Smart transitions were paused" notice.
     @Published public internal(set) var transitionRecoveryNoticePending = false
