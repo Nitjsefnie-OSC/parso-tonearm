@@ -16,6 +16,7 @@ extension AudioPlayer: MixDeckHost {
     /// "Use for everything" is on, and auditions.
     var wantsMixDecks: Bool {
         guard !isAmbient else { return false }
+        if plainRestoreAfterRecovery, isRestoring { return false }
         if auditionRequested || isMixQueue { return true }
         guard smartTransitionsEnabled else { return false }
         return UserDefaults.standard.bool(forKey: "smartTransitionsEverywhere")
@@ -42,15 +43,19 @@ extension AudioPlayer: MixDeckHost {
             return false
         }
         smartBlendFallback = nil
+        // Durable sentinel first: a kill during the decode or mixer start must be attributable.
+        transitionSafety.enter(.startingCurrent)
         if mixDecks == nil {
             do {
                 mixDecks = try MixDeckPlayer(host: self)
             } catch {
+                transitionSafety.resolve(.safeFallback)
                 mixDecksLog.error("mix decks unavailable, playing on AVPlayer: \(error.localizedDescription, privacy: .public)")
                 return false
             }
         }
-        guard let mixDecks else { return false }
+        guard let mixDecks else { transitionSafety.resolve(.safeFallback); return false }
+        mixDecks.safety = transitionSafety
         cancelCrossfade(resetVolume: true)
         shutdownLoaders()
         dropPreloadedNext()

@@ -124,6 +124,8 @@ final class MixDeckPlayer {
     }
 
     private unowned let host: MixDeckHost
+    /// Durable risk sentinel around decode/plan/schedule work; nil in tests and offline renders.
+    var safety: TransitionSafetyMonitor?
     private let output: MixDeckOutput
     private(set) var current: Deck?
     private(set) var upcoming: Upcoming?
@@ -236,7 +238,9 @@ final class MixDeckPlayer {
         }
         scheduled = nil
         current = nil
+        safety?.enter(.startingCurrent)
         do { try output.reset() } catch {
+            safety?.resolve(.safeFallback)
             host.mixDecksCouldNotPlay(index: index, reason: "Audio output failed: \(error.localizedDescription)")
             return
         }
@@ -261,6 +265,7 @@ final class MixDeckPlayer {
             return
         }
         host.mixDecksLoading(true)
+        safety?.enter(.decodingCurrent)
         let load = audioTask(for: track)
         dropLoads(keeping: [track.trackID])
         startTask = Task { [weak self] in
@@ -275,6 +280,7 @@ final class MixDeckPlayer {
                 self.startTask = nil
                 self.loads[track.trackID] = nil
                 self.host.mixDecksLoading(false)
+                self.safety?.resolve(.safeFallback)
                 self.host.mixDecksCouldNotPlay(index: index, reason: error.localizedDescription)
             }
         }
@@ -294,6 +300,7 @@ final class MixDeckPlayer {
     }
 
     func stop() {
+        safety?.resolve(.cancelled)
         epoch += 1
         startTask?.cancel()
         cancelPlanning()
@@ -361,6 +368,7 @@ final class MixDeckPlayer {
               let track = host.mixDecksTrack(at: nextIndex) else {
             cancelPlanning()
             dropLoads(keeping: [current.trackID])
+            safety?.resolve(.completed)
             host.mixDecksPublish(plan: nil, state: .ready)
             return
         }
@@ -383,6 +391,7 @@ final class MixDeckPlayer {
         cancelPlanning()
         upcoming = nil
         planning = target
+        safety?.enter(.planningIncoming)
         dropLoads(keeping: [current.trackID, track.trackID])
         let load = audioTask(for: track)
         host.mixDecksPublish(plan: nil, state: .queued)
@@ -425,6 +434,7 @@ final class MixDeckPlayer {
                 guard let self, self.planning == target, !(error is CancellationError) else { return }
                 self.planning = nil
                 self.loads[track.trackID] = nil
+                self.safety?.resolve(.safeFallback)
                 Self.log.error("mix decks: preparing the next track failed: \(error.localizedDescription, privacy: .public)")
                 self.host.mixDecksPublish(plan: nil, state: .failed(error.localizedDescription))
             }
@@ -473,6 +483,7 @@ final class MixDeckPlayer {
                 let flip = plan.style == .phraseCut ? plan.blendStart : plan.swapTime
                 scheduled = Scheduled(incoming: incoming, joinFrame: outgoingZero + join * sr,
                                       flipFrame: outgoingZero + flip * sr, edge: edge)
+                safety?.enter(.scheduled)
                 host.mixDecksPublish(plan: BlendPlanCache.transitionPlan(plan, from: current.trackID,
                                                                          to: upcoming.audio.trackID,
                                                                          outgoingTempo: current.tempo),
@@ -534,6 +545,18 @@ final class MixDeckPlayer {
             return
         }
         if let seconds = currentSeconds { host.mixDecksPosition(seconds: seconds) }
+        if let safety {
+            if let scheduled, scheduled.edge == .blend, now >= scheduled.joinFrame {
+                safety.enter(.overlap)
+            } else if scheduled?.edge == .blend {
+                safety.heartbeat()
+            } else if isPreparing {
+                safety.heartbeat()
+            } else if safety.isActive {
+                // Stable and non-risky: nothing left decoding, planning or blending.
+                safety.resolve(.completed)
+            }
+        }
         let other = current.deck.other
         if scheduled == nil, mix.state(of: other) == .finished {
             mix.reset(other)
