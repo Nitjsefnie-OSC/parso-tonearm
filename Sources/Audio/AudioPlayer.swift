@@ -113,6 +113,10 @@ public final class AudioPlayer: ObservableObject {
     @Published public var queueSource: QueueSource = .none
     @Published public internal(set) var transitionPlan: TransitionPlan?
     @Published public internal(set) var transitionPrepState: GridPrepState = .ready
+    /// True from the engine's handoff until the outgoing track is inaudible. While set,
+    /// `transitionPlan` stays the A→B edge; the next B→C plan waits in `deferredTransitionPlan`.
+    @Published public internal(set) var isOutgoingTransitionTailAudible = false
+    var deferredTransitionPlan: (plan: TransitionPlan?, state: GridPrepState)?
     /// Set while an edge plays continuously because a smart blend was not admitted.
     @Published public internal(set) var smartBlendFallback: TransitionFallbackStatus?
 
@@ -516,6 +520,7 @@ public final class AudioPlayer: ObservableObject {
         guard !isAmbient else { return }
         pendingRestoreSeek = nil  // user-initiated seek cancels restore confirmation
         if let mixDecks {
+            endOutgoingTransitionTail()
             mixDecks.seek(to: seconds)
             currentTime = seconds
             updateNowPlayingTime()

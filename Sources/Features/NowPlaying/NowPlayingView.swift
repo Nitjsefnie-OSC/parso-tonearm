@@ -82,6 +82,7 @@ struct NowPlayingView: View {
                 meta.padding(.top, 22)
                 if !player.isAmbient {
                     scrubber.padding(.top, 20)
+                    TransitionCard().padding(.top, 10)
                 }
                 transport.padding(.top, 16)
                 toolbar.padding(.top, 16)
