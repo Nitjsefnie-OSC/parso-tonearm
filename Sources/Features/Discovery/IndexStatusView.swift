@@ -58,7 +58,22 @@ struct IndexStatusView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .glassSurface(cornerRadius: 18)
                     } else {
-                        ProgressView("Reading Sound Index…").padding(.top, 40)
+                        // No spinner: a read that never completes must not look
+                        // like progress. Say what is happening and let the
+                        // owner retry.
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("Sound Index status not loaded yet", systemImage: "waveform")
+                                .font(Typography.body)
+                            Text("The status is read in the background and appears here when ready.")
+                                .font(Typography.caption)
+                                .foregroundStyle(Palette.inkSecondary)
+                            Button("Retry") { Task { await model.refresh() } }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.accent)
+                        }
+                        .padding(15)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .glassSurface(cornerRadius: 18)
                     }
                     if let detail = model.snapshot?.modelDiagnostics {
                         modelsCard(detail)
