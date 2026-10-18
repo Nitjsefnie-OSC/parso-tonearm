@@ -135,23 +135,12 @@ final class TransitionPrepService: ObservableObject {
             if path.status != .satisfied { return .waitingForNetwork }
             if cellularBlocked && path.usesInterfaceType(.cellular) { return .waitingForWiFi }
         }
-        let peak = TransitionDecodeBudget.estimatedPeakBytes(
-            durationSec: row.track.durationSec, sampleRate: row.track.sampleRate, fileBytes: nil)
-        guard TransitionDecodeBudget.fits(estimatedPeakBytes: peak, availableBytes: Self.availableMemory()) else {
+        let metadata = TransitionTrackMetadata(durationSec: row.track.durationSec, sampleRate: row.track.sampleRate)
+        guard TransitionDecodeBudget.admission(outgoing: nil, incoming: metadata) == .allowSmartBlend else {
             // This track plays normally; it just gets no planned blend ahead of time.
             return .failed(String(localized: "Too long to prepare on this device"))
         }
         return nil
-    }
-
-    /// What this process can still allocate before the OS ends it (iOS), or nil where there's no
-    /// such limit to respect (macOS).
-    private static func availableMemory() -> Int64? {
-        #if os(iOS)
-        return Int64(os_proc_available_memory())
-        #else
-        return nil
-        #endif
     }
 
     private func resumeWhenNetworkAllows() {

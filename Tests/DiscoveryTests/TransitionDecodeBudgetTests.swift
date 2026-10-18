@@ -1,4 +1,5 @@
 import XCTest
+import TonearmCore
 @testable import TonearmDiscovery
 
 /// The transition-prep crash (allocation abort decoding whole hi-res FLACs concurrently):
