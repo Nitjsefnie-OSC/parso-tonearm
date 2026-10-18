@@ -187,6 +187,10 @@ final class AppState: ObservableObject {
             try? await Task.sleep(for: .seconds(12))
         }
         #endif
+        // Before anything can restore the queue: an interrupted transition setup pauses
+        // Everywhere and drops pending prep, so restoration plays on AVPlayer.
+        AudioPlayer.shared.applyLaunchRecovery()
+        if AudioPlayer.shared.plainRestoreAfterRecovery { transitionPrepService.stop() }
         await fixLegacySourceTitles()
         await repairDuplicatePlaylistsOnce()
         // Before DiscoveryRuntimeController.startAfterBootstrap() (called

@@ -30,6 +30,16 @@ protocol MixDeckHost: AnyObject, Sendable {
     func mixDecksOutgoingDidFinish()
     /// How the track at `from` hands over to the one at `to`.
     func mixDecksEdge(from: Int, to: Int) -> MixDeckEdge
+    /// Whether the track at `index` may be whole-decoded now, alone or as the incoming side of a
+    /// blend out of `outgoing`. Nothing is decoded before this allows it.
+    func mixDecksAdmission(index: Int, outgoing: Int?) -> TransitionAdmissionDecision
+    /// The track at `index` was denied; it plays normally (never skipped).
+    func mixDecksDenied(index: Int, decision: TransitionAdmissionDecision)
+}
+
+extension MixDeckHost {
+    func mixDecksAdmission(index: Int, outgoing: Int?) -> TransitionAdmissionDecision { .allowSmartBlend }
+    func mixDecksDenied(index: Int, decision: TransitionAdmissionDecision) {}
 }
 
 extension MixDeckHost {
@@ -120,6 +130,8 @@ final class MixDeckPlayer {
     }
 
     private unowned let host: MixDeckHost
+    /// Durable risk sentinel around decode/plan/schedule work; nil in tests and offline renders.
+    var safety: TransitionSafetyMonitor?
     private let output: MixDeckOutput
     private(set) var current: Deck?
     private(set) var upcoming: Upcoming?
@@ -149,9 +161,36 @@ final class MixDeckPlayer {
     init(host: MixDeckHost, offline: Bool = false) throws {
         self.host = host
         output = try MixDeckOutput(sampleRate: Self.sampleRate, offline: offline)
+        let center = NotificationCenter.default
+        pressureObservers = [
+            center.addObserver(forName: Notification.Name("UIApplicationDidReceiveMemoryWarningNotification"),
+                               object: nil, queue: .main) { [weak self] _ in
+                TransitionPressure.shared.noteMemoryWarning()
+                Task { @MainActor in self?.shedFuturePreparation() }
+            },
+            center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                let state = ProcessInfo.processInfo.thermalState
+                guard state == .serious || state == .critical else { return }
+                Task { @MainActor in self?.shedFuturePreparation() }
+            }
+        ]
+    }
+
+    private var pressureObservers: [any NSObjectProtocol] = []
+
+    /// Memory or thermal pressure: stop preparing what is not audible yet and free it. The
+    /// current track (and an already executing transition) keeps playing.
+    func shedFuturePreparation() {
+        guard scheduled == nil else { return }
+        cancelPlanning()
+        upcoming = nil
+        dropLoads(keeping: current.map { [$0.trackID] } ?? [])
+        if current != nil { host.mixDecksPublish(plan: nil, state: .cancelled) }
     }
 
     isolated deinit {
+        pressureObservers.forEach { NotificationCenter.default.removeObserver($0) }
         startTask?.cancel()
         cancelPlanning()
         ticker?.cancel()
@@ -205,7 +244,9 @@ final class MixDeckPlayer {
         }
         scheduled = nil
         current = nil
+        safety?.enter(.startingCurrent)
         do { try output.reset() } catch {
+            safety?.resolve(.safeFallback)
             host.mixDecksCouldNotPlay(index: index, reason: "Audio output failed: \(error.localizedDescription)")
             return
         }
@@ -221,7 +262,16 @@ final class MixDeckPlayer {
             host.mixDecksCouldNotPlay(index: index, reason: "The track has no playable audio")
             return
         }
+        let admission = host.mixDecksAdmission(index: index, outgoing: nil)
+        guard admission == .allowSmartBlend else {
+            cancelPlanning()
+            dropLoads(keeping: [])
+            output.stop()
+            host.mixDecksDenied(index: index, decision: admission)
+            return
+        }
         host.mixDecksLoading(true)
+        safety?.enter(.decodingCurrent)
         let load = audioTask(for: track)
         dropLoads(keeping: [track.trackID])
         startTask = Task { [weak self] in
@@ -236,6 +286,7 @@ final class MixDeckPlayer {
                 self.startTask = nil
                 self.loads[track.trackID] = nil
                 self.host.mixDecksLoading(false)
+                self.safety?.resolve(.safeFallback)
                 self.host.mixDecksCouldNotPlay(index: index, reason: error.localizedDescription)
             }
         }
@@ -255,6 +306,7 @@ final class MixDeckPlayer {
     }
 
     func stop() {
+        safety?.resolve(.cancelled)
         epoch += 1
         startTask?.cancel()
         cancelPlanning()
@@ -322,6 +374,7 @@ final class MixDeckPlayer {
               let track = host.mixDecksTrack(at: nextIndex) else {
             cancelPlanning()
             dropLoads(keeping: [current.trackID])
+            safety?.resolve(.completed)
             host.mixDecksPublish(plan: nil, state: .ready)
             return
         }
@@ -333,9 +386,18 @@ final class MixDeckPlayer {
         let target = PlanningTarget(outgoingTrackID: current.trackID, outgoingTempo: current.tempo,
                                     index: nextIndex, trackID: track.trackID)
         if planning == target { return }
+        let admission = host.mixDecksAdmission(index: nextIndex, outgoing: host.mixDecksCurrentIndex)
+        guard admission == .allowSmartBlend else {
+            cancelPlanning()
+            upcoming = nil
+            dropLoads(keeping: [current.trackID])
+            host.mixDecksDenied(index: nextIndex, decision: admission)
+            return
+        }
         cancelPlanning()
         upcoming = nil
         planning = target
+        safety?.enter(.planningIncoming)
         dropLoads(keeping: [current.trackID, track.trackID])
         let load = audioTask(for: track)
         host.mixDecksPublish(plan: nil, state: .queued)
@@ -378,6 +440,7 @@ final class MixDeckPlayer {
                 guard let self, self.planning == target, !(error is CancellationError) else { return }
                 self.planning = nil
                 self.loads[track.trackID] = nil
+                self.safety?.resolve(.safeFallback)
                 Self.log.error("mix decks: preparing the next track failed: \(error.localizedDescription, privacy: .public)")
                 self.host.mixDecksPublish(plan: nil, state: .failed(error.localizedDescription))
             }
@@ -426,6 +489,7 @@ final class MixDeckPlayer {
                 let flip = plan.style == .phraseCut ? plan.blendStart : plan.swapTime
                 scheduled = Scheduled(incoming: incoming, joinFrame: outgoingZero + join * sr,
                                       flipFrame: outgoingZero + flip * sr, edge: edge)
+                safety?.enter(.scheduled)
                 host.mixDecksPublish(plan: BlendPlanCache.transitionPlan(plan, from: current.trackID,
                                                                          to: upcoming.audio.trackID,
                                                                          outgoingTempo: current.tempo),
@@ -495,6 +559,18 @@ final class MixDeckPlayer {
             tailDeck = nil
             host.mixDecksOutgoingDidFinish()
         }
+        if let safety {
+            if let scheduled, scheduled.edge == .blend, now >= scheduled.joinFrame {
+                safety.enter(.overlap)
+            } else if scheduled?.edge == .blend {
+                safety.heartbeat()
+            } else if isPreparing {
+                safety.heartbeat()
+            } else if safety.isActive {
+                // Stable and non-risky: nothing left decoding, planning or blending.
+                safety.resolve(.completed)
+            }
+        }
         let other = current.deck.other
         if scheduled == nil, mix.state(of: other) == .finished {
             mix.reset(other)
@@ -522,13 +598,16 @@ final class MixDeckPlayer {
             } else {
                 storedBPM = bpm
             }
-            return try await MixTrackLoader.load(trackID: trackID, source: source, approximateBPM: storedBPM,
-                                                 sampleRate: sampleRate) { stage in
+            // One whole-track decode in the app at a time; a cancelled one never starts.
+            return try await TransitionDecodeGate.shared.runAsync {
+                try await MixTrackLoader.load(trackID: trackID, source: source, approximateBPM: storedBPM,
+                                              sampleRate: sampleRate) { stage in
                 Task { @MainActor [weak host] in
                     switch stage {
                     case .downloading(let fraction): host?.mixDecksPublish(plan: nil, state: .downloading(fraction))
                     case .analyzing: host?.mixDecksPublish(plan: nil, state: .analyzing(0))
                     }
+                }
                 }
             }
         }
