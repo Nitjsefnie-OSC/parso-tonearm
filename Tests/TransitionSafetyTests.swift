@@ -21,8 +21,8 @@ final class TransitionSafetyTests: XCTestCase {
     private var clock: TestClock!
     private let suite = "tonearm.transition-safety.tests"
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("ts-\(UUID().uuidString)")
         store = TransitionSafetyStateStore(url: dir.appendingPathComponent("s.json"))
         defaults = UserDefaults(suiteName: suite)
@@ -33,10 +33,10 @@ final class TransitionSafetyTests: XCTestCase {
         clock = TestClock()
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         defaults.removePersistentDomain(forName: suite)
         try? FileManager.default.removeItem(at: dir)
-        super.tearDown()
+        try await super.tearDown()
     }
 
     private func monitor() -> TransitionSafetyMonitor { TransitionSafetyMonitor(store: store, clock: clock.clock) }
