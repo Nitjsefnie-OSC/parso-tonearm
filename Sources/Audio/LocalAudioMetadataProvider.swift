@@ -31,7 +31,7 @@ public struct LocalAudioSourceFingerprint: Equatable, Codable, Sendable {
               let size = (attrs[.size] as? NSNumber)?.int64Value,
               let date = attrs[.modificationDate] as? Date else { return nil }
         let id = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value
-        return LocalAudioSourceFingerprint(size: size, modified: date.timeIntervalSince1970, fileID: id)
+        return Self(size: size, modified: date.timeIntervalSince1970, fileID: id)
     }
 }
 
