@@ -101,6 +101,9 @@ struct UpNextView: View {
                                      position: offset + 1,
                                      isCurrent: offset == player.index,
                                      queueIndex: offset)
+                            if offset + 1 < player.queue.count {
+                                QueueTransitionConnector(presentation: connectorPresentation(after: offset))
+                            }
                         }
                             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                             .listRowBackground(Color.clear)
@@ -143,9 +146,14 @@ struct UpNextView: View {
         }
     }
 
+    /// The active edge shows the live snapshot; later edges say they are planned when up next.
+    private func connectorPresentation(after offset: Int) -> TransitionPresentation {
+        offset == player.index ? player.transitionPresentation : TransitionPresentation(phase: .notPlanned)
+    }
+
     private var queueListHeight: CGFloat {
         let visibleRows = min(max(player.queue.count, 1), 6)
-        return CGFloat(visibleRows) * 52
+        return CGFloat(visibleRows) * 96
     }
 
     /// The obvious, discoverable Keep Playing control (CLAUDE.md "no silent/
