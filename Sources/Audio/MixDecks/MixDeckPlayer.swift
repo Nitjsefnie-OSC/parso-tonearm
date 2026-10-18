@@ -26,6 +26,8 @@ protocol MixDeckHost: AnyObject, Sendable {
     func mixDecksLoading(_ loading: Bool)
     /// The next blend and the honest state of its preparation.
     func mixDecksPublish(plan: TransitionPlan?, state: GridPrepState)
+    /// The outgoing track's deck has played out after a handoff: nothing of it is audible any more.
+    func mixDecksOutgoingDidFinish()
     /// How the track at `from` hands over to the one at `to`.
     func mixDecksEdge(from: Int, to: Int) -> MixDeckEdge
     /// Whether the track at `index` may be whole-decoded now, alone or as the incoming side of a
@@ -38,6 +40,10 @@ protocol MixDeckHost: AnyObject, Sendable {
 extension MixDeckHost {
     func mixDecksAdmission(index: Int, outgoing: Int?) -> TransitionAdmissionDecision { .allowSmartBlend }
     func mixDecksDenied(index: Int, decision: TransitionAdmissionDecision) {}
+}
+
+extension MixDeckHost {
+    func mixDecksOutgoingDidFinish() {}
 }
 
 /// How one track hands over to the next on the mix decks.
@@ -529,12 +535,16 @@ final class MixDeckPlayer {
         }
     }
 
+    /// The deck that handed over at the last flip, until it has fully played out.
+    private var tailDeck: MixDeck?
+
     func tick() {
         guard let current else { return }
         let mix = output.mix
         let now = Double(mix.masterFrame)
         if let scheduled, now >= scheduled.flipFrame {
             var incoming = scheduled.incoming
+            tailDeck = current.deck
             self.scheduled = nil
             upcoming = nil
             reportedEnd = false
@@ -545,6 +555,10 @@ final class MixDeckPlayer {
             return
         }
         if let seconds = currentSeconds { host.mixDecksPosition(seconds: seconds) }
+        if let tail = tailDeck, mix.state(of: tail) == .finished {
+            tailDeck = nil
+            host.mixDecksOutgoingDidFinish()
+        }
         if let safety {
             if let scheduled, scheduled.edge == .blend, now >= scheduled.joinFrame {
                 safety.enter(.overlap)

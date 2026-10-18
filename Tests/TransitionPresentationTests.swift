@@ -1,0 +1,92 @@
+import XCTest
+@testable import TonearmCore
+
+final class TransitionPresentationTests: XCTestCase {
+    private func plan(_ style: TransitionStyle, exit: Double = 100, overlap: Double = 12,
+                      from: Int64 = 1, to: Int64 = 2) -> TransitionPlan {
+        TransitionPlan(fromTrackID: from, toTrackID: to, style: style, exitTime: exit,
+                       overlapSeconds: overlap, confidence: 0.8)
+    }
+
+    func testPhraseReadyConnector() {
+        let p = TransitionPresentation.make(plan: plan(.phraseFade), preparation: .ready, position: 76)
+        XCTAssertEqual(p.phase, .ready)
+        XCTAssertEqual(p.connectorLabel, "Phrase-matched · 12 s · Ready")
+        XCTAssertEqual(p.secondsUntilOverlap, 24)
+        XCTAssertEqual(p.diagramSegments, [.outgoing, .overlap, .incoming])
+        XCTAssertTrue(p.accessibilityLabel().contains("phrase-matched blend in 24 seconds"))
+    }
+
+    func testBeatMatchedPreparing() {
+        let p = TransitionPresentation.make(plan: plan(.beatmatchedBlend), preparation: .analyzing(0.3))
+        XCTAssertEqual(p.phase, .preparing)
+        XCTAssertTrue(p.connectorLabel.hasPrefix("Beat-matched"))
+        XCTAssertTrue(p.connectorLabel.hasSuffix("Preparing"))
+    }
+
+    func testGaplessIsNotFallback() {
+        let p = TransitionPresentation.make(plan: plan(.gapless, overlap: 0), preparation: .ready)
+        XCTAssertFalse(p.isFallback)
+        XCTAssertEqual(p.connectorLabel, "Gapless continuation · Ready")
+        XCTAssertTrue(p.diagramSegments.isEmpty)
+    }
+
+    func testMissingPlanFallsBackTruthfully() {
+        let p = TransitionPresentation.make(plan: nil, preparation: .failed("x"))
+        XCTAssertTrue(p.isFallback)
+        XCTAssertEqual(p.connectorLabel, "Continuous playback — smart blend unavailable")
+        XCTAssertEqual(p.fallbackDetail, "Smart blend unavailable on this device")
+        XCTAssertNil(p.secondsUntilOverlap)
+        XCTAssertFalse(p.fallbackDetail?.contains("/") ?? false)
+    }
+
+    func testEndOfQueueHasNoEdge() {
+        XCTAssertEqual(TransitionPresentation.make(plan: nil, preparation: .ready, hasNext: false), .none)
+        XCTAssertFalse(TransitionPresentation.none.showsConnector)
+    }
+
+    func testOverlapNamesBothTracksAndSkipsDecoration() {
+        let p = TransitionPresentation.make(plan: plan(.beatmatchedBlend), preparation: .ready, position: 106)
+        XCTAssertEqual(p.phase, .overlap)
+        XCTAssertEqual(p.secondsRemaining, 6)
+        let label = p.accessibilityLabel(outgoingTitle: "Midnight City", incomingTitle: "Wait")
+        XCTAssertEqual(label, "Blending Midnight City into Wait; 6 seconds remaining")
+        XCTAssertTrue(p.cardTitle.hasPrefix("Blending now"))
+        let head = try! XCTUnwrap(p.playhead(position: 106))
+        XCTAssertEqual(head, 0.5, accuracy: 0.001)
+    }
+
+    func testUnknownStyleAndMissingTimingDoNotCrash() {
+        XCTAssertEqual(TransitionDisplayStyle(rawEngineStyle: "quantumMorph"), .smartBlend)
+        XCTAssertEqual(TransitionDisplayStyle.smartBlend.label, "Smart blend")
+        let p = TransitionPresentation.make(plan: plan(.phraseFade, exit: 0, overlap: 0), preparation: nil, position: 5)
+        XCTAssertNil(p.overlapRange)
+        XCTAssertTrue(p.diagramSegments.isEmpty)
+        XCTAssertNil(p.playhead(position: 5))
+        _ = p.accessibilityLabel(); _ = p.cardTitle; _ = p.accessibilityValue
+    }
+
+    func testOutgoingTailKeepsEdgeAndIDs() {
+        let p = TransitionPresentation.make(plan: plan(.beatmatchedBlend, from: 1, to: 2),
+                                            preparation: .ready, position: 3, outgoingTail: true)
+        XCTAssertEqual(p.phase, .outgoingTail)
+        XCTAssertEqual(p.outgoingTrackID, 1)
+        XCTAssertEqual(p.incomingTrackID, 2)
+        XCTAssertTrue(p.isBlendingNow)
+    }
+
+    @MainActor
+    func testHandoffKeepsABUntilOutgoingFinishes() {
+        let player = AudioPlayer.shared
+        let ab = plan(.beatmatchedBlend, from: 1, to: 2)
+        let bc = plan(.phraseFade, from: 2, to: 3)
+        player.transitionPlan = ab
+        player.isOutgoingTransitionTailAudible = true
+        player.mixDecksPublish(plan: bc, state: .ready)
+        XCTAssertEqual(player.transitionPlan, ab)
+        player.mixDecksOutgoingDidFinish()
+        XCTAssertEqual(player.transitionPlan, bc)
+        XCTAssertFalse(player.isOutgoingTransitionTailAudible)
+        player.transitionPlan = nil
+    }
+}

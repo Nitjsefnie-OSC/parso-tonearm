@@ -200,7 +200,7 @@ extension AudioPlayer {
     }
 
     /// Runs the sentinel check before restoration can choose mix decks. Once per player.
-    func applyLaunchRecovery() {
+    public func applyLaunchRecovery() {
         guard !launchRecoveryDone else { return }
         launchRecoveryDone = true
         let outcome = TransitionLaunchRecovery.run(store: transitionSafetyStore, defaults: .standard,
