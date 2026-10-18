@@ -16,6 +16,7 @@ extension AudioPlayer: MixDeckHost {
     /// "Use for everything" is on, and auditions.
     var wantsMixDecks: Bool {
         guard !isAmbient else { return false }
+        if plainRestoreAfterRecovery, isRestoring { return false }
         if auditionRequested || isMixQueue { return true }
         guard smartTransitionsEnabled else { return false }
         return UserDefaults.standard.bool(forKey: "smartTransitionsEverywhere")
@@ -34,21 +35,30 @@ extension AudioPlayer: MixDeckHost {
     /// Loads the current track onto the mix decks. False when the decks can't
     /// be created, and the caller plays it on AVPlayer instead.
     func loadCurrentOnMixDecks(row: TrackRow, autoplay: Bool) -> Bool {
+        // Nothing is decoded (not even on queue restore, paused) unless the whole-track mixer is admitted.
+        let admission = mixDecksAdmission(index: index, outgoing: nil)
+        guard admission == .allowSmartBlend else {
+            mixDecksLog.notice("smart blend not admitted for current track, playing normally: \(String(describing: admission), privacy: .public)")
+            smartBlendFallback = TransitionFallbackStatus(decision: admission)
+            return false
+        }
+        smartBlendFallback = nil
+        // Durable sentinel first: a kill during the decode or mixer start must be attributable.
+        transitionSafety.enter(.startingCurrent)
         if mixDecks == nil {
             do {
                 mixDecks = try MixDeckPlayer(host: self)
             } catch {
+                transitionSafety.resolve(.safeFallback)
                 mixDecksLog.error("mix decks unavailable, playing on AVPlayer: \(error.localizedDescription, privacy: .public)")
                 return false
             }
         }
-        guard let mixDecks else { return false }
+        guard let mixDecks else { transitionSafety.resolve(.safeFallback); return false }
+        mixDecks.safety = transitionSafety
         cancelCrossfade(resetVolume: true)
         shutdownLoaders()
-        preloadedNextLoader?.shutdown()
-        preloadedNextItem = nil
-        preloadedNextTrackId = nil
-        preloadedNextLoader = nil
+        dropPreloadedNext()
         player.pause()
         player.replaceCurrentItem(with: nil)
         transitionPlan = nil
@@ -161,6 +171,28 @@ extension AudioPlayer: MixDeckHost {
             return
         }
         next()
+    }
+
+    func mixDecksAdmission(index target: Int, outgoing: Int?) -> TransitionAdmissionDecision {
+        guard queue.indices.contains(target) else { return .gaplessFallback(reason: .unavailableSource) }
+        func metadata(_ i: Int) -> TransitionTrackMetadata {
+            TransitionTrackMetadata(durationSec: queue[i].track.durationSec, sampleRate: queue[i].track.sampleRate)
+        }
+        let sourceAvailable = queue[target].asset.flatMap { mixTrackSource(for: $0) } != nil
+        let outgoingMetadata = outgoing.flatMap { queue.indices.contains($0) ? metadata($0) : nil }
+        return TransitionAdmissionController.decide(outgoing: outgoingMetadata, incoming: metadata(target),
+                                                    sourceAvailable: sourceAvailable, system: .current())
+    }
+
+    func mixDecksDenied(index deniedIndex: Int, decision: TransitionAdmissionDecision) {
+        smartBlendFallback = TransitionFallbackStatus(decision: decision)
+        transitionPlan = nil
+        transitionPrepState = .failed(smartBlendFallback?.message ?? "")
+        guard deniedIndex == index else { return }
+        // The current track itself was denied: play it on AVPlayer, never skip it.
+        let resume = isPlaying
+        stopMixDecks()
+        loadCurrent(autoplay: resume)
     }
 
     func mixDecksCouldNotPlay(index failedIndex: Int, reason: String) {

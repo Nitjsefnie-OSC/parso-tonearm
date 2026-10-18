@@ -113,6 +113,8 @@ public final class AudioPlayer: ObservableObject {
     @Published public var queueSource: QueueSource = .none
     @Published public internal(set) var transitionPlan: TransitionPlan?
     @Published public internal(set) var transitionPrepState: GridPrepState = .ready
+    /// Set while an edge plays continuously because a smart blend was not admitted.
+    @Published public internal(set) var smartBlendFallback: TransitionFallbackStatus?
 
     /// Smart transitions is a playback setting, not just a Settings toggle.
     /// The app mirrors the preference here at launch and whenever the toggle
@@ -149,8 +151,23 @@ public final class AudioPlayer: ObservableObject {
     var itemEndObserver: NSObjectProtocol?
     var timeControlCancellable: AnyCancellable?
     var itemStatusCancellable: AnyCancellable?
+    var localResolver = LocalAssetResolver.live
+    var localReadinessTask: Task<Void, Never>?
+    var localReadinessTimeout: Duration = .seconds(10)
+    /// Set by `buildItem(for:)` when a local asset could not be opened.
+    var lastLocalFailure: LocalMediaFailure?
     var restoreTask: Task<Void, Never>?
     var isRestoring = false
+    /// Where the transition-risk sentinel lives; tests point it at a temp file.
+    var transitionSafetyStore = TransitionSafetyStateStore.default
+    var transitionSafetyClock = TransitionSafetyClock.system
+    private(set) lazy var transitionSafety = TransitionSafetyMonitor(store: transitionSafetyStore,
+                                                                     clock: transitionSafetyClock)
+    /// Set by launch recovery: the restore after an interrupted transition setup plays on AVPlayer.
+    var plainRestoreAfterRecovery = false
+    var launchRecoveryDone = false
+    /// Drives the one-time "Smart transitions were paused" notice.
+    @Published public internal(set) var transitionRecoveryNoticePending = false
     var pendingRestoreSeek: Double?
     /// Injectable persistence funnel: tests can swap in fakes/spies.
     public var persistor = PlaybackPositionPersistor()
@@ -271,10 +288,7 @@ public final class AudioPlayer: ObservableObject {
         // it here, before loadCurrent ever runs for this new queue — not
         // via invalidatePreloadedNext(), which also repreloads against the
         // OLD queue/index that are about to be overwritten below anyway.
-        preloadedNextLoader?.shutdown()
-        preloadedNextItem = nil
-        preloadedNextTrackId = nil
-        preloadedNextLoader = nil
+        dropPreloadedNext()
         unshuffledQueue = []
         queueSource = source
         queue = tracks
@@ -547,13 +561,13 @@ public final class AudioPlayer: ObservableObject {
         }
         prefetchLoaders.removeAll()
         prefetchedURLs.removeAll()
-        preloadedNextLoader?.shutdown()
-        preloadedNextItem = nil
-        preloadedNextTrackId = nil
-        preloadedNextLoader = nil
+        dropPreloadedNext()
         Task { await AudioCache.shared.setProtectedKeys([]) }
 
+        localReadinessTask?.cancel()
+        itemStatusCancellable = nil
         player.pause()
+        (player.currentItem as? LocalPlayerItem)?.releaseLease()
         player.replaceCurrentItem(with: nil)
         isPlaying = false
         currentTime = 0

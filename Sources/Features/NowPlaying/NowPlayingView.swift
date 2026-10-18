@@ -93,8 +93,11 @@ struct NowPlayingView: View {
             }
         }
         .presentationDragIndicator(.hidden)
+        .onAppear { LocalPlaybackDiagnostics.shared.record(.nowPlayingAppear, loadID: 0) }
+        .onDisappear { LocalPlaybackDiagnostics.shared.record(.nowPlayingDisappear, loadID: 0) }
         .task(id: player.currentTrack?.id) {
             guard let row = player.currentTrack else { return }
+            LocalPlaybackDiagnostics.shared.record(.artworkRequest, loadID: 0)
             npArtwork = await ArtworkService.shared.artwork(forTrackRow: row)
         }
         .artworkImagePicker(isPresented: $showPhotoPicker) { data in
