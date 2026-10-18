@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 #if os(iOS)
-import os.proc
+import os
 #endif
 
 /// Why a live smart transition was not admitted. Category only: no titles, paths or byte counts,
