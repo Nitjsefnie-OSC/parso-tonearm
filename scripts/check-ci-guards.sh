@@ -225,6 +225,11 @@ fi
 # The watch may sign with an App Group (watch redesign A2: Now Playing state shared with its
 # Smart Stack widget) and nothing else — no iCloud, keychain or push entitlements in the closure.
 WATCH_ENTITLEMENTS=$(printf '%s\n' "$WATCH_TARGET" | sed -n 's/.*CODE_SIGN_ENTITLEMENTS:[[:space:]]*//p' | head -1)
+# Xcode project settings commonly retain this placeholder; PlistBuddy needs a
+# filesystem path in CI rather than the unexpanded build-setting spelling.
+WATCH_ENTITLEMENTS=${WATCH_ENTITLEMENTS/'$(SRCROOT)'/$PWD}
+WATCH_ENTITLEMENTS=${WATCH_ENTITLEMENTS%;}
+[[ "$WATCH_ENTITLEMENTS" = /* ]] || WATCH_ENTITLEMENTS="$PWD/$WATCH_ENTITLEMENTS"
 if [ -n "$WATCH_ENTITLEMENTS" ]; then
   WATCH_ENTITLEMENT_KEYS=$(/usr/libexec/PlistBuddy -c Print "$WATCH_ENTITLEMENTS" 2>/dev/null \
     | sed -n 's/^    \([A-Za-z0-9._-]*\) = .*/\1/p' | sort -u)
