@@ -187,6 +187,8 @@ public final class AudioPlayer: ObservableObject {
     /// Near-gapless (T2.5): the next queue item, preloaded (with its cache/EQ
     /// attached) so the boundary swap is seamless rather than a fresh teardown.
     var preloadedNextItem: AVPlayerItem?
+    /// Track whose Smart Blend was denied for this edge only; the next mix-deck load of it is skipped once.
+    var smartBlendDeniedTrackID: Int64?
     var preloadedNextTrackId: Int64?
     var preloadedNextLoader: CachingResourceLoader?
     var loadedSourceSampleRate: Double = 0

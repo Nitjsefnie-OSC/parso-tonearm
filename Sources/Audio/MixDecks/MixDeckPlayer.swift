@@ -442,7 +442,7 @@ final class MixDeckPlayer {
                 self.loads[track.trackID] = nil
                 self.safety?.resolve(.safeFallback)
                 Self.log.error("mix decks: preparing the next track failed: \(error.localizedDescription, privacy: .public)")
-                self.host.mixDecksPublish(plan: nil, state: .failed(error.localizedDescription))
+                self.host.mixDecksDenied(index: nextIndex, decision: .gaplessFallback(reason: .preparationFailed))
             }
         }
     }

@@ -13,6 +13,10 @@ public enum TransitionAdmissionReason: String, Sendable, Equatable, CaseIterable
     case thermalPolicy
     case lowPowerPolicy
     case unavailableSource
+    /// The incoming track was not prepared before its handoff point.
+    case deadline
+    /// Fetching, decoding or analysing the incoming track failed.
+    case preparationFailed
     case cancelled
 
     /// Concise, honest wording for queue / Now Playing surfaces.
@@ -29,6 +33,8 @@ public enum TransitionAdmissionReason: String, Sendable, Equatable, CaseIterable
         case .thermalPolicy: return "Continuous playback. Smart blend unavailable: device is warm."
         case .lowPowerPolicy: return "Continuous playback. Smart blend unavailable: Low Power Mode."
         case .unavailableSource: return "Continuous playback. Smart blend unavailable: audio source not available."
+        case .deadline: return "Continuous playback. Smart blend unavailable: next track was not ready in time."
+        case .preparationFailed: return "Continuous playback. Smart blend unavailable: could not prepare the next track."
         case .cancelled: return "Continuous playback. Smart blend cancelled."
         }
     }
@@ -193,10 +199,40 @@ public enum TransitionAdmissionController {
     }
 }
 
+/// What the audio path actually did at an edge, as opposed to the style that was requested or
+/// the preparation result. Surfaces must label the edge from this, never from a promised style.
+public enum TransitionExecutedKind: String, Sendable, Equatable, CaseIterable {
+    /// Both sources were audible together.
+    case overlapCrossfade
+    /// The outgoing track faded out, then the incoming faded in; sources never overlapped.
+    case fadeOutFadeIn
+    /// One track ended and the next started; continuity is not proven.
+    case sequentialHandoff
+    /// Continuity was proven (e.g. same-album, sample-accurate follow-on).
+    case gapless
+
+    public static func resolve(sourcesOverlap: Bool, fades: Bool, continuityProven: Bool) -> TransitionExecutedKind {
+        if sourcesOverlap { return .overlapCrossfade }
+        if fades { return .fadeOutFadeIn }
+        return continuityProven ? .gapless : .sequentialHandoff
+    }
+
+    public var label: String {
+        switch self {
+        case .overlapCrossfade: "Crossfade"
+        case .fadeOutFadeIn: "Fade out, fade in"
+        case .sequentialHandoff: "Continuous playback"
+        case .gapless: "Gapless"
+        }
+    }
+}
+
 /// The honest state of an edge that is not blending, published for queue / Now Playing surfaces.
 public struct TransitionFallbackStatus: Sendable, Equatable {
     public let reason: TransitionAdmissionReason
     public let isDeferred: Bool
+    /// A denied edge plays through the normal player: sequential, never labelled gapless or crossfade.
+    public let executed: TransitionExecutedKind = .sequentialHandoff
     public init(decision: TransitionAdmissionDecision) {
         reason = decision.reason ?? .unavailableMetadata
         if case .defer = decision { isDeferred = true } else { isDeferred = false }
