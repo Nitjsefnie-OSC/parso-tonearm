@@ -45,7 +45,8 @@ struct UpNextView: View {
                         Image(systemName: "xmark.circle")
                             .font(Typography.caption)
                             .foregroundStyle(Palette.inkSecondary)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Clear auto-added tracks")
@@ -62,10 +63,11 @@ struct UpNextView: View {
                         Image(systemName: editMode == .active ? "checkmark" : "line.3.horizontal")
                             .font(Typography.caption)
                             .foregroundStyle(Palette.inkSecondary)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(editMode == .active ? "Done Reordering" : "Reorder Up Next")
+                    .accessibilityLabel(QueueAccessibility.reorderLabel(isReordering: editMode == .active))
                 }
                 #endif
             }
@@ -114,6 +116,9 @@ struct UpNextView: View {
                                 } label: {
                                     Label("Remove", systemImage: "trash")
                                 }
+                            }
+                            .accessibilityAction(named: QueueAccessibility.removeActionName) {
+                                player.removeFromQueue(at: offset)
                             }
                     }
                     .onMove { offsets, destination in
@@ -173,13 +178,17 @@ struct UpNextView: View {
             .foregroundStyle(player.keepPlayingEnabled ? Palette.accent : Palette.inkTertiary)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
             .background(player.keepPlayingEnabled ? Palette.accent.opacity(0.16) : Palette.ink.opacity(0.06),
                         in: Capsule())
         }
         .buttonStyle(.plain)
         .disabled(player.isAmbient)
         .accessibilityLabel("Keep Playing")
-        .accessibilityValue(player.keepPlayingEnabled ? "on" : "off")
+        .accessibilityValue(QueueAccessibility.keepPlayingValue(isOn: player.keepPlayingEnabled))
+        .accessibilityHint(QueueAccessibility.keepPlayingHint)
+        .accessibilityAddTraits(player.keepPlayingEnabled ? .isSelected : [])
         .accessibilityIdentifier("np.keepPlaying")
     }
 
@@ -264,9 +273,18 @@ private struct QueueRow: View {
             }
         }
         .padding(.vertical, 4)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
         .onTapGesture {
             player.skipToIndex(queueIndex)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(QueueAccessibility.rowLabel(
+            position: position, title: row.track.title,
+            artist: row.artist?.name ?? row.album?.artist ?? ""))
+        .accessibilityValue(QueueAccessibility.rowValue(isCurrent: isCurrent))
+        .accessibilityHint(QueueAccessibility.rowHint(isCurrent: isCurrent))
+        .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { player.skipToIndex(queueIndex) }
     }
 }
