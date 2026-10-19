@@ -35,6 +35,11 @@ extension AudioPlayer: MixDeckHost {
     /// Loads the current track onto the mix decks. False when the decks can't
     /// be created, and the caller plays it on AVPlayer instead.
     func loadCurrentOnMixDecks(row: TrackRow, autoplay: Bool) -> Bool {
+        // An edge denied moments ago is not retried: that would re-enter the unsafe backend.
+        if let denied = smartBlendDeniedTrackID {
+            smartBlendDeniedTrackID = nil
+            if denied == row.track.id { return false }
+        }
         // Nothing is decoded (not even on queue restore, paused) unless the whole-track mixer is admitted.
         let admission = mixDecksAdmission(index: index, outgoing: nil)
         guard admission == .allowSmartBlend else {
@@ -196,11 +201,24 @@ extension AudioPlayer: MixDeckHost {
         smartBlendFallback = TransitionFallbackStatus(decision: decision)
         transitionPlan = nil
         transitionPrepState = .failed(smartBlendFallback?.message ?? "")
-        guard deniedIndex == index else { return }
-        // The current track itself was denied: play it on AVPlayer, never skip it.
+        // Per-edge only: the "Everywhere" preference is untouched.
+        smartBlendDeniedTrackID = queue.indices.contains(deniedIndex) ? queue[deniedIndex].track.id : nil
+        guard deniedIndex == index else {
+            // Prepare the denied upcoming track on the normal player now, so the handoff
+            // does not wait for next() to build it.
+            preloadNextItem(allowingMixDecks: true)
+            return
+        }
+        // The current track itself was denied: play it on AVPlayer, never skip it,
+        // keeping its position and play state.
         let resume = isPlaying
+        let position = mixDecks?.currentSeconds ?? currentTime
         stopMixDecks()
         loadCurrent(autoplay: resume)
+        if position > 0.5 {
+            player.seek(to: CMTime(seconds: position, preferredTimescale: 600))
+            currentTime = position
+        }
     }
 
     func mixDecksCouldNotPlay(index failedIndex: Int, reason: String) {

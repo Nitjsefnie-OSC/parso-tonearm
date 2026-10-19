@@ -1,9 +1,6 @@
 import XCTest
 @testable import TonearmCore
 
-private func waitSynchronously(_ s: DispatchSemaphore, seconds: Double) -> Bool {
-    s.wait(timeout: .now() + seconds) == .success
-}
 private func blockSynchronously(_ s: DispatchSemaphore) { s.wait() }
 
 final class ResourceCoordinatorTests: XCTestCase {
@@ -82,9 +79,7 @@ final class ResourceCoordinatorTests: XCTestCase {
             }
         }
         let didStart = await withCheckedContinuation { (k: CheckedContinuation<Bool, Never>) in
-            DispatchQueue.global().async {
-                k.resume(returning: waitSynchronously(started, seconds: 5))
-            }
+            DispatchQueue.global().async { k.resume(returning: started.wait(timeout: .now() + 5) == .success) }
         }
         XCTAssertTrue(didStart)
         task.cancel()
