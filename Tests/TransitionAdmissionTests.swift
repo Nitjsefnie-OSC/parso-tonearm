@@ -91,6 +91,25 @@ final class TransitionAdmissionTests: XCTestCase {
         XCTAssertEqual(counter.peak, 1)
     }
 
+    func testExecutedKindLabelsOnlyWhatHappened() {
+        XCTAssertEqual(TransitionExecutedKind.resolve(sourcesOverlap: true, fades: true, continuityProven: true), .overlapCrossfade)
+        XCTAssertEqual(TransitionExecutedKind.resolve(sourcesOverlap: false, fades: true, continuityProven: false), .fadeOutFadeIn)
+        XCTAssertEqual(TransitionExecutedKind.resolve(sourcesOverlap: false, fades: false, continuityProven: false), .sequentialHandoff)
+        XCTAssertEqual(TransitionExecutedKind.resolve(sourcesOverlap: false, fades: false, continuityProven: true), .gapless)
+        for reason in TransitionAdmissionReason.allCases {
+            let status = TransitionFallbackStatus(decision: .gaplessFallback(reason: reason))
+            XCTAssertEqual(status.executed, .sequentialHandoff)
+        }
+    }
+
+    func testDeadlineAndPreparationFailureAreDistinctReasons() {
+        let late = TransitionAdmissionReason.deadline.accessibilityLabel
+        let failed = TransitionAdmissionReason.preparationFailed.accessibilityLabel
+        XCTAssertNotEqual(late, failed)
+        XCTAssertNotEqual(late, TransitionAdmissionReason.unavailableMetadata.accessibilityLabel)
+        XCTAssertNotEqual(failed, TransitionAdmissionReason.unavailableSource.accessibilityLabel)
+    }
+
     func testReasonsArePrivacySafeAndAccessible() {
         for reason in TransitionAdmissionReason.allCases {
             XCTAssertFalse(reason.accessibilityLabel.isEmpty)
