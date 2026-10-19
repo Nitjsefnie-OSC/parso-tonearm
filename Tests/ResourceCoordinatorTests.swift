@@ -64,21 +64,25 @@ final class ResourceCoordinatorTests: XCTestCase {
         XCTAssertEqual(c.snapshot().lastDenial, .insufficientHeadroom)
     }
 
+    private static func waitSynchronously(_ s: DispatchSemaphore, seconds: Double) -> Bool {
+        s.wait(timeout: .now() + seconds) == .success
+    }
     private static func blockSynchronously(_ s: DispatchSemaphore) { s.wait() }
 
     func testCancelDoesNotReleaseUntilWorkerExits() async throws {
         let c = make(avail: Box(3_000 * mb))
         let mb = self.mb
-        let started = expectation(description: "started")
+        let started = DispatchSemaphore(value: 0)
         let finish = DispatchSemaphore(value: 0)
-        let task = Task.detached {
+        let task = Task.detached { () -> Bool in
             try await c.run(.liveDecode, bytes: 100 * mb) { r in
-                started.fulfill()
+                started.signal()
                 Self.blockSynchronously(finish)   // uninterruptible synchronous decoder
                 return r.isCancellationRequested
             }
         }
-        await fulfillment(of: [started], timeout: 5)
+        let didStart = await Task.detached { Self.waitSynchronously(started, seconds: 5) }.value
+        XCTAssertTrue(didStart)
         task.cancel()
         XCTAssertEqual(c.snapshot().pendingBytes, 100 * mb)
         finish.signal()
