@@ -41,6 +41,18 @@ auto-generated playlists · analysis stages 1–2 (BPM, key, energy) ·
 
 Mixes plan order, tempo shape, key relationships, and transition preparation from your library. They do not use bass-swap EQ or stems; the regular crossfade remains the honest fallback.
 
+## TestFlight and human QA
+
+The release system reconciles accepted uploads with App Store Connect on a
+schedule. `testflight-uploaded` means Apple accepted the archive;
+`testflight-processing` means it is not ready; `ready-for-qa` means the exact
+version/build is processed (`VALID`). `testflight-distribution-confirmed` is
+extra tester-group evidence. `testflight-access-unverified` does not mean the
+build cannot be installed—it only records an unavailable or empty group query.
+Testers should install the exact build named in the issue's **TestFlight
+availability** comment, run its checklist, then record device, OS, build, and
+pass/fail on the issue. Only the human owner closes issues.
+
 ## Roadmap
 
 - **CarPlay** — *planned, pending Apple's entitlement approval.* It is deliberately absent

@@ -1,0 +1,29 @@
+name: TestFlight Availability Reconcile
+on:
+  schedule:
+    - cron: '13,28,43,58 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: testflight-availability-reconcile
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.CLAUDE_WORKFLOW_TOKEN }}
+      ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+      ASC_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, persist-credentials: false }
+      - run: |
+          test -n "$ASC_KEY" || { echo '::error::APPSTORE_API_PRIVATE_KEY is not configured'; exit 1; }
+          printf '%s\n' "$ASC_KEY" > "$RUNNER_TEMP/appstore-key.p8"
+          chmod 600 "$RUNNER_TEMP/appstore-key.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/appstore-key.p8" >> "$GITHUB_ENV"
+      - run: bash .github/scripts/reconcile-testflight-status.sh
