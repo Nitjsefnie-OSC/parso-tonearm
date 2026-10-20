@@ -246,7 +246,10 @@ final class MixDeckPlayer {
         tailDeck = nil
         scheduled = nil
         current = nil
-        safety?.enter(.startingCurrent)
+        if let safety, !safety.enter(.startingCurrent) {
+            host.mixDecksCouldNotPlay(index: index, reason: "Smart Blend safety journal unavailable")
+            return
+        }
         do { try output.reset() } catch {
             safety?.resolve(.safeFallback)
             host.mixDecksCouldNotPlay(index: index, reason: "Audio output failed: \(error.localizedDescription)")
@@ -272,8 +275,11 @@ final class MixDeckPlayer {
             host.mixDecksDenied(index: index, decision: admission)
             return
         }
+        if let safety, !safety.enter(.decodingCurrent) {
+            host.mixDecksCouldNotPlay(index: index, reason: "Smart Blend safety journal unavailable")
+            return
+        }
         host.mixDecksLoading(true)
-        safety?.enter(.decodingCurrent)
         let load = audioTask(for: track)
         dropLoads(keeping: [track.trackID])
         startTask = Task { [weak self] in
@@ -399,8 +405,11 @@ final class MixDeckPlayer {
         }
         cancelPlanning()
         upcoming = nil
+        if let safety, !safety.enter(.planningIncoming) {
+            host.mixDecksDenied(index: nextIndex, decision: .gaplessFallback(reason: .preparationFailed))
+            return
+        }
         planning = target
-        safety?.enter(.planningIncoming)
         dropLoads(keeping: [current.trackID, track.trackID])
         let load = audioTask(for: track)
         host.mixDecksPublish(plan: nil, state: .queued)
@@ -417,7 +426,10 @@ final class MixDeckPlayer {
                 } else {
                     self.host.mixDecksPublish(plan: nil, state: .analyzing(0.5))
                     let deck = outgoing
+                    let safety = self.safety
+                    safety?.workerStarted()
                     let planning = try await Task.detached(priority: .utility) { () throws -> BlendPlanning in
+                        defer { Task { @MainActor in safety?.workerExited() } }
                         guard let played = deck.played
                                 ?? BlendEdgePlanner.played(deck.audio, tempo: deck.tempo, analysis: deck.playedAnalysis),
                               let planning = BlendEdgePlanner.plan(outgoing: played, incoming: audio) else {
@@ -492,7 +504,7 @@ final class MixDeckPlayer {
                 let flip = plan.style == .phraseCut ? plan.blendStart : plan.swapTime
                 scheduled = Scheduled(incoming: incoming, joinFrame: outgoingZero + join * sr,
                                       flipFrame: outgoingZero + flip * sr, edge: edge)
-                safety?.enter(.scheduled)
+                _ = safety?.enter(.scheduled)   // already journaled active; a failed phase update leaves the earlier phase on disk
                 host.mixDecksPublish(plan: BlendPlanCache.transitionPlan(plan, from: current.trackID,
                                                                          to: upcoming.audio.trackID,
                                                                          outgoingTempo: current.tempo),
@@ -564,7 +576,7 @@ final class MixDeckPlayer {
         }
         if let safety {
             if let scheduled, scheduled.edge == .blend, now >= scheduled.joinFrame {
-                safety.enter(.overlap)
+                _ = safety.enter(.overlap)
             } else if scheduled?.edge == .blend {
                 safety.heartbeat()
             } else if isPreparing {
@@ -594,7 +606,11 @@ final class MixDeckPlayer {
         let trackID = track.trackID, source = track.source, bpm = track.bpm
         let sampleRate = Self.sampleRate
         let host = self.host
+        let safety = self.safety
+        safety?.workerStarted()
         let task = Task.detached(priority: .userInitiated) { () throws -> MixTrackAudio in
+            // The sentinel stays until this worker really exits, even if it was cancelled meanwhile.
+            defer { Task { @MainActor in safety?.workerExited() } }
             let storedBPM: Double?
             if bpm == nil {
                 storedBPM = (try? await LibraryStore.shared.blendTempoHint(trackId: trackID)) ?? nil

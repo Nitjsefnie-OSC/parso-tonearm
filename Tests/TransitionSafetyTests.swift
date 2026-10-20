@@ -159,4 +159,101 @@ final class TransitionSafetyTests: XCTestCase {
             XCTAssertFalse(text.contains(forbidden), forbidden)
         }
     }
+
+    // MARK: Journal assessment, worker lifetime, failures
+
+    func testKillDuringEachPhaseIsInterruptedNotConfirmedCrash() {
+        for phase in [TransitionSafetyPhase.decodingCurrent, .planningIncoming, .overlap] {
+            try? FileManager.default.removeItem(at: store.url)
+            monitor().enter(phase)
+            clock.advance(3)
+            let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+            guard case .interrupted(_, let seen, .recent) = outcome.assessment else {
+                return XCTFail("\(phase): \(outcome.assessment)")
+            }
+            XCTAssertEqual(seen, phase)
+        }
+    }
+
+    func testConfirmedCrashNeedsEvidence() {
+        let m = monitor()
+        m.enter(.overlap)
+        guard case .loaded(let s) = store.load(), let id = s.operation?.operationID else { return XCTFail() }
+        let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock,
+                                                   confirmedCrashOperationIDs: [id])
+        XCTAssertEqual(outcome.assessment, .confirmedCrash(operationID: id, phase: .overlap))
+    }
+
+    func testStableForceQuitIsClean() {
+        let m = monitor()
+        m.enter(.overlap)
+        m.resolve(.completed)
+        let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        XCTAssertEqual(outcome.assessment, .clean)
+        XCTAssertFalse(outcome.plainPlayback)
+    }
+
+    func testCancellationKeepsSentinelUntilWorkerExits() {
+        let m = monitor()
+        m.enter(.decodingCurrent)
+        m.workerStarted()
+        m.resolve(.cancelled)
+        m.resolve(.completed)
+        guard case .loaded(let during) = store.load() else { return XCTFail() }
+        XCTAssertEqual(during.operation?.isActive, true, "decode still running")
+        clock.advance(TransitionLaunchRecovery.maxSuspectAge * 2)
+        m.heartbeat()
+        m.workerExited()
+        guard case .loaded(let after) = store.load() else { return XCTFail() }
+        XCTAssertEqual(after.operation?.isActive, false)
+        XCTAssertEqual(after.operation?.resolution, .completed)
+    }
+
+    func testRebootAndClockChangeAreClassifiedByUptime() {
+        monitor().enter(.planningIncoming)
+        let skewed = TransitionSafetyClock(now: { Date(timeIntervalSince1970: 1) }, uptime: { [clock] in clock!.up + 2 })
+        guard case .interrupted(_, _, .recent) = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: skewed).assessment
+        else { return XCTFail("clock change must not matter") }
+        monitor().enter(.planningIncoming)
+        let rebooted = TransitionSafetyClock(now: { [clock] in clock!.now + 86_400 }, uptime: { 1 })
+        guard case .interrupted(_, _, .afterReboot) = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).assessment
+        else { return XCTFail() }
+    }
+
+    func testRepeatedLaunchAssessmentIsIdempotent() {
+        monitor().enter(.decodingCurrent)
+        _ = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        XCTAssertEqual(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock).assessment, .clean)
+    }
+
+    func testUnreadableJournalAssessment() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("{not json".utf8).write(to: store.url)
+        XCTAssertEqual(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock).assessment,
+                       .journalUnreadable)
+    }
+
+    func testFailedWriteRefusesRiskyWorkAndIsExplicit() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let blocker = dir.appendingPathComponent("file")
+        try Data("x".utf8).write(to: blocker)
+        let bad = TransitionSafetyStateStore(url: blocker.appendingPathComponent("s.json"))
+        let m = TransitionSafetyMonitor(store: bad, clock: clock.clock)
+        var started = false
+        if m.enter(.decodingCurrent) { started = true }
+        XCTAssertFalse(started, "no risky work after a failed journal write")
+        XCTAssertTrue(m.lastWriteFailed)
+        XCTAssertFalse(m.isActive)
+    }
+
+    func testStoredBytesAreOpaqueAndBounded() throws {
+        monitor().enter(.planningIncoming, estimatedBytes: 10)
+        let text = String(decoding: try Data(contentsOf: store.url), as: UTF8.self)
+        let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+        let op = object?["operation"] as? [String: Any]
+        XCTAssertEqual(Set(op?.keys.map { $0 } ?? []),
+                       ["operationID", "phase", "isActive", "startedAt", "heartbeatAt", "startedUptime",
+                        "heartbeatUptime", "generation", "estimatedBytes"])
+        XCTAssertNotNil(UUID(uuidString: op?["operationID"] as? String ?? ""))
+    }
 }
