@@ -39,6 +39,7 @@ struct AddServerSheet: View {
             if let error {
                 Text(error).font(Typography.callout).foregroundStyle(Palette.danger)
                     .multilineTextAlignment(.center).padding(.top, 14)
+                    .accessibilityLabel(CatalogueAccountAccessibility.errorAnnouncement(error))
             }
 
             Spacer(minLength: 12)
@@ -56,7 +57,10 @@ struct AddServerSheet: View {
                     Task { await connect() }
                 } label: {
                     Group {
-                        if isConnecting { ProgressView().tint(Palette.accentOnFill) }
+                        if isConnecting {
+                            ProgressView().tint(Palette.accentOnFill)
+                                .accessibilityLabel(CatalogueAccountAccessibility.connectingLabel)
+                        }
                         else { actionLabel(title: LocalizedStringKey(actionTitle), icon: authKind == .oauth ? "person.crop.circle.badge.checkmark" : "checkmark") }
                     }
                 }
@@ -166,6 +170,11 @@ struct AddServerSheet: View {
                                     in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(CatalogueAccountAccessibility.connectorLabel(
+                        title: option.title, isAdvanced: option.tier == .advanced))
+                    .accessibilityValue(CatalogueAccountAccessibility.connectorValue(
+                        isSelected: option.id == selectedConnectorID))
+                    .accessibilityAddTraits(option.id == selectedConnectorID ? .isSelected : [])
                     .accessibilityIdentifier("Remote Library Connector \(option.id)")
                 }
             }
