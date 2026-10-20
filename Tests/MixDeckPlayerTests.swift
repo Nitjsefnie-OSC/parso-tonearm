@@ -18,6 +18,7 @@ final class MixDeckPlayerTests: XCTestCase {
         var lastState: GridPrepState = .ready
         var states: [GridPrepState] = []
         var edge: MixDeckEdge = .blend
+        var outgoingFinished = 0
         weak var player: MixDeckPlayer?
 
         var mixDecksCurrentIndex = 0
@@ -38,6 +39,7 @@ final class MixDeckPlayerTests: XCTestCase {
         func mixDecksCouldNotPlay(index: Int, reason: String) { failures.append(reason) }
         func mixDecksPosition(seconds: Double) {}
         func mixDecksLoading(_ loading: Bool) {}
+        func mixDecksOutgoingDidFinish() { outgoingFinished += 1 }
         func mixDecksEdge(from: Int, to: Int) -> MixDeckEdge { edge }
         func mixDecksPublish(plan: TransitionPlan?, state: GridPrepState) {
             lastState = state
@@ -134,6 +136,119 @@ final class MixDeckPlayerTests: XCTestCase {
             let handover = try XCTUnwrap(host.advanced.first?.seconds)
             XCTAssertEqual(handover, 12 + 1_024 / MixDeckPlayer.sampleRate, accuracy: 0.1, "\(edge)")
         }
+    }
+
+    /// Renders `seconds` more of mix time, waiting for preparation between slices.
+    private func renderFor(_ player: MixDeckPlayer, seconds: Double) async throws {
+        let target = player.masterFrame + Int64(seconds * MixDeckPlayer.sampleRate)
+        while player.masterFrame < target {
+            while player.isPreparing { try await Task.sleep(nanoseconds: 20_000_000) }
+            XCTAssertNotNil(player.renderOffline(frames: 4_096))
+        }
+    }
+
+    private func makePlayer(_ host: Host, _ urls: [URL]) throws -> MixDeckPlayer {
+        host.tracks = urls.map { ($0, 124) }
+        let player = try MixDeckPlayer(host: host, offline: true)
+        host.player = player
+        return player
+    }
+
+    /// Renders until the blend is audible (join passed, flip not yet reached).
+    private func renderIntoOverlap(_ player: MixDeckPlayer) async throws {
+        player.start(index: 0, at: 0, autoplay: true)
+        while player.isPreparing || player.current == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        var guardFrames = 0
+        while !(player.scheduled.map { Double(player.masterFrame) >= $0.joinFrame } ?? false), guardFrames < 20_000 {
+            while player.isPreparing { try await Task.sleep(nanoseconds: 20_000_000) }
+            // Small steps once the blend is placed: a phrase cut joins and flips within ~130 frames.
+            _ = player.renderOffline(frames: player.scheduled == nil ? 4_096 : 32)
+            guardFrames += 1
+        }
+        XCTAssertNotNil(player.scheduled, "a blend is scheduled and audible")
+    }
+
+    func testSkipDuringOverlapKeepsOneCurrentAndNoStaleTail() async throws {
+        let a = try clickTrack(bpm: 124, seconds: 30)
+        let b = try clickTrack(bpm: 124, seconds: 20)
+        defer { [a, b].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let host = Host()
+        let player = try makePlayer(host, [a, b])
+        try await renderIntoOverlap(player)
+        host.mixDecksCurrentIndex = 1
+        player.start(index: 1, at: 0, autoplay: true)   // the listener skips forward mid-overlap
+        XCTAssertNil(player.scheduled, "the overlap is cancelled")
+        try await renderFor(player, seconds: 2)
+        XCTAssertEqual(player.current?.index, 1)
+        XCTAssertEqual(host.failures, [])
+        XCTAssertEqual(host.mixDecksCurrentIndex, 1)
+    }
+
+    func testRapidRestartsLeaveTheLastCommandAuthoritative() async throws {
+        let a = try clickTrack(bpm: 124, seconds: 20)
+        let b = try clickTrack(bpm: 124, seconds: 20)
+        defer { [a, b].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let host = Host()
+        let player = try makePlayer(host, [a, b])
+        for i in 0..<6 {
+            host.mixDecksCurrentIndex = i % 2
+            player.start(index: i % 2, at: 0, autoplay: true)
+        }
+        player.pause(); player.resume(); player.pause(); player.resume()
+        host.mixDecksCurrentIndex = 1
+        player.start(index: 1, at: 0, autoplay: true)
+        while player.current == nil || player.isPreparing { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(player.current?.index, 1)
+        XCTAssertEqual(host.failures, [])
+        XCTAssertTrue(host.advanced.isEmpty, "no stale startup advanced the queue")
+    }
+
+    func testPauseResumeDuringOverlapKeepsTheScheduledBlend() async throws {
+        let a = try clickTrack(bpm: 124, seconds: 30)
+        let b = try clickTrack(bpm: 124, seconds: 20)
+        defer { [a, b].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let host = Host()
+        let player = try makePlayer(host, [a, b])
+        try await renderIntoOverlap(player)
+        let scheduled = player.scheduled?.flipFrame
+        player.pause()
+        player.resume()
+        XCTAssertEqual(player.scheduled?.flipFrame, scheduled)
+        XCTAssertEqual(player.current?.index, 0, "the outgoing stays authoritative until the flip")
+        try await renderFor(player, seconds: 20)
+        XCTAssertEqual(host.advanced.map(\.index), [1])
+    }
+
+    func testRestartAfterHandoffDoesNotReportAStaleOutgoingFinish() async throws {
+        let a = try clickTrack(bpm: 124, seconds: 30)
+        let b = try clickTrack(bpm: 124, seconds: 20)
+        defer { [a, b].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let host = Host()
+        let player = try makePlayer(host, [a, b])
+        try await renderIntoOverlap(player)
+        while host.advanced.isEmpty { _ = player.renderOffline(frames: 32) }
+        XCTAssertEqual(host.outgoingFinished, 0)
+        player.start(index: 1, at: 0, autoplay: true)   // seek/skip while the tail is still audible
+        try await renderFor(player, seconds: 25)
+        XCTAssertEqual(host.outgoingFinished, 0, "the discarded tail never reports as finished")
+    }
+
+    func testUnavailableTrackFallsBackWithoutAdvancing() async throws {
+        let host = Host()
+        let player = try MixDeckPlayer(host: host, offline: true)
+        host.player = player
+        player.start(index: 0, at: 0, autoplay: true)    // no track at all
+        XCTAssertEqual(host.failures.count, 1)
+        XCTAssertNil(player.current)
+        XCTAssertNil(player.scheduled)
+        // Recovery: the same player plays a real track afterwards.
+        let a = try clickTrack(bpm: 124, seconds: 5)
+        defer { try? FileManager.default.removeItem(at: a) }
+        host.tracks = [(a, 124)]
+        player.start(index: 0, at: 0, autoplay: true)
+        while player.current == nil || player.isPreparing { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(player.current?.index, 0)
+        XCTAssertEqual(host.failures.count, 1)
     }
 
     /// A listening render of a whole mix through the playback path. Set

@@ -242,6 +242,8 @@ final class MixDeckPlayer {
             cancelPlanning()
             upcoming = nil
         }
+        // A restart (skip, seek, back) discards any overlap: the old outgoing tail is gone with the reset.
+        tailDeck = nil
         scheduled = nil
         current = nil
         safety?.enter(.startingCurrent)
@@ -318,6 +320,7 @@ final class MixDeckPlayer {
         current = nil
         upcoming = nil
         scheduled = nil
+        tailDeck = nil
     }
 
     /// The queue after the current track changed (edit, Keep Playing append),
