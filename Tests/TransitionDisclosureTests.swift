@@ -36,4 +36,26 @@ final class TransitionDisclosureTests: XCTestCase {
         XCTAssertNil(TransitionDisclosure(TransitionPresentation(phase: .fallback), position: 0))
         XCTAssertNil(TransitionDisclosure(overlap(phase: .ready), position: 0))
     }
+
+    func testPhraseCutOverlapShowsPhraseStyleAndNoInventedTiming() throws {
+        let d = try XCTUnwrap(TransitionDisclosure(overlap(nil, style: .phraseBlend), position: 40))
+        XCTAssertEqual(d.matchType, "Phrase-matched")
+        XCTAssertNil(d.overlapProgress)
+        let p = overlap(nil, style: .phraseBlend)
+        XCTAssertFalse(p.fallbackDetail?.contains("device") ?? false)
+        XCTAssertNil(p.secondsRemaining)
+    }
+
+    func testFallbackNeverBlamesTheDevice() {
+        let p = TransitionPresentation(phase: .fallback)
+        XCTAssertNil(TransitionDisclosure(p, position: 0))
+        XCTAssertFalse((p.fallbackDetail ?? "").contains("device"))
+    }
+
+    func testHandoffKeepsDisclosureWhileOutgoingAudible() throws {
+        let tail = overlap(phase: .outgoingTail)
+        XCTAssertNotNil(TransitionDisclosure(tail, position: 3))
+        XCTAssertEqual(tail.outgoingTrackID, 1)
+        XCTAssertEqual(tail.incomingTrackID, 2)
+    }
 }

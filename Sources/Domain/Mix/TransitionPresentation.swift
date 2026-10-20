@@ -196,7 +196,7 @@ public struct TransitionPresentation: Sendable, Equatable {
     /// Why the edge fell back, if the plan says so. Never a path or a raw error.
     public var fallbackDetail: String? {
         guard phase == .fallback else { return nil }
-        return String(localized: "Smart blend unavailable on this device", bundle: .module)
+        return String(localized: "No smart blend plan for this transition", bundle: .module)
     }
 
     /// The queue connector text, e.g. "Phrase-matched · 12 s · Ready".
