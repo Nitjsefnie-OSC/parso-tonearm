@@ -17,7 +17,27 @@ struct SmartTransitionsView: View {
         Section("Smart transitions") {
             Toggle("Use Smart transitions", isOn: $enabled)
             Toggle("Use for everything", isOn: $everywhere)
-                .disabled(!enabled)
+                .disabled(!enabled || player.transitionRecoveryStatus.isPaused)
+            if player.transitionRecoveryStatus.isPaused {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(TransitionRecoveryStatus.message)
+                    Text(TransitionRecoveryStatus.detail)
+                        .font(Typography.caption)
+                        .foregroundStyle(Palette.inkSecondary)
+                    if let last = player.transitionRecoveryStatus.lastInterruptedAt {
+                        Text("Last interruption: \(last.formatted(date: .abbreviated, time: .shortened)) · seen \(player.transitionRecoveryStatus.interruptedCount)×")
+                            .font(Typography.caption)
+                            .foregroundStyle(Palette.inkSecondary)
+                    }
+                    if let error = player.transitionRecoveryError {
+                        Text(error).font(Typography.caption).foregroundStyle(.red)
+                    }
+                    Button("Re-enable Smart Transitions everywhere") {
+                        player.resolveTransitionRecovery(reenable: true)
+                        everywhere = UserDefaults.standard.bool(forKey: "smartTransitionsEverywhere")
+                    }
+                }
+            }
             Toggle("Prepare remote tracks on Wi-Fi only", isOn: $wifiOnly)
                 .disabled(!enabled)
             Text("On for mixes by default. Platterhead prepares every track in the current queue one at a time.")

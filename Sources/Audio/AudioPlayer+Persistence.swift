@@ -207,18 +207,28 @@ extension AudioPlayer {
                                                    clock: transitionSafetyClock)
         plainRestoreAfterRecovery = outcome.plainPlayback
         transitionRecoveryNoticePending = outcome.showsNotice
+        refreshTransitionRecoveryStatus()
         if outcome.plainPlayback { stopMixDecks() }
     }
 
     /// The listener's answer to the recovery notice. Re-enable turns only Everywhere back on.
     public func resolveTransitionRecovery(reenable: Bool) {
+        transitionRecoveryError = nil
         if reenable {
-            TransitionLaunchRecovery.reenable(store: transitionSafetyStore, defaults: .standard)
+            guard TransitionLaunchRecovery.reenable(store: transitionSafetyStore, defaults: .standard) else {
+                transitionRecoveryError = "Couldn't save the change, so Smart Transitions stay paused. Try again."
+                return
+            }
         } else {
             TransitionLaunchRecovery.keepPaused(store: transitionSafetyStore)
         }
         plainRestoreAfterRecovery = false
         transitionRecoveryNoticePending = false
+        refreshTransitionRecoveryStatus()
+    }
+
+    func refreshTransitionRecoveryStatus() {
+        transitionRecoveryStatus = TransitionLaunchRecovery.status(store: transitionSafetyStore)
     }
 
     /// Resets the once-per-process restore guard so tests can re-run
