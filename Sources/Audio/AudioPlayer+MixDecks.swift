@@ -49,7 +49,10 @@ extension AudioPlayer: MixDeckHost {
         }
         smartBlendFallback = nil
         // Durable sentinel first: a kill during the decode or mixer start must be attributable.
-        transitionSafety.enter(.startingCurrent)
+        guard transitionSafety.enter(.startingCurrent) else {
+            mixDecksLog.error("smart blend safety journal unavailable, playing normally")
+            return false
+        }
         if mixDecks == nil {
             do {
                 mixDecks = try MixDeckPlayer(host: self)
