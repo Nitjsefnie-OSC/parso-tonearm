@@ -152,6 +152,8 @@ struct QueueTransitionConnector: View {
     let presentation: TransitionPresentation
     @State private var showDetail = false
 
+    private var timeline: QueueEdgeTimeline { QueueEdgeTimeline(presentation) }
+
     private var glyph: String {
         switch presentation.phase {
         case .fallback: "arrow.right"
@@ -163,14 +165,14 @@ struct QueueTransitionConnector: View {
 
     var body: some View {
         Button { showDetail = true } label: {
-            Label(presentation.connectorLabel, systemImage: glyph)
+            Label(timeline.summary, systemImage: glyph)
                 .font(Typography.caption)
                 .foregroundStyle(Palette.inkSecondary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(presentation.connectorLabel)
+        .accessibilityLabel(timeline.accessibilityLabel)
         .accessibilityHint("Shows why this transition was chosen")
         .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: presentation) }
     }
