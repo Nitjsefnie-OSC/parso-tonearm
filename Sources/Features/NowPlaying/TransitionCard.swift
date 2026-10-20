@@ -6,15 +6,17 @@ struct TransitionDetailSheet: View {
     @EnvironmentObject private var player: AudioPlayer
     @EnvironmentObject private var transitionPrep: TransitionPrepService
     let presentation: TransitionPresentation
+    var note: String?
 
     var body: some View {
         NavigationStack {
-            if let plan = player.transitionPlan, presentation.phase != .notPlanned {
+            if let plan = player.transitionPlan, presentation.phase != .notPlanned,
+               plan.fromTrackID == presentation.outgoingTrackID, plan.toTrackID == presentation.incomingTrackID {
                 WhyThisTransitionView(plan: plan, preparationState: presentation.preparation)
             } else {
                 List {
                     Section("Why This Transition?") {
-                        Text(presentation.connectorLabel)
+                        Text(note ?? presentation.connectorLabel)
                         if let detail = presentation.fallbackDetail {
                             Text(detail).foregroundStyle(Palette.inkSecondary)
                         }
@@ -149,10 +151,11 @@ struct TransitionDiagram: View {
 
 /// Connector shown between adjacent queue rows. At least 44 pt tall; label plus a shape glyph.
 struct QueueTransitionConnector: View {
-    let presentation: TransitionPresentation
+    let edge: QueueEdgeRow
     @State private var showDetail = false
 
-    private var timeline: QueueEdgeTimeline { QueueEdgeTimeline(presentation) }
+    private var presentation: TransitionPresentation { edge.presentation }
+    private var timeline: QueueEdgeTimeline { edge.timeline }
 
     private var glyph: String {
         switch presentation.phase {
@@ -165,15 +168,15 @@ struct QueueTransitionConnector: View {
 
     var body: some View {
         Button { showDetail = true } label: {
-            Label(timeline.summary, systemImage: glyph)
+            Label(edge.summary, systemImage: glyph)
                 .font(Typography.caption)
                 .foregroundStyle(Palette.inkSecondary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(timeline.accessibilityLabel)
+        .accessibilityLabel(edge.accessibilityLabel)
         .accessibilityHint("Shows why this transition was chosen")
-        .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: presentation) }
+        .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: presentation, note: edge.reason) }
     }
 }

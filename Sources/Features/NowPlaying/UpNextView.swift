@@ -93,6 +93,10 @@ struct UpNextView: View {
                     .foregroundStyle(Palette.inkTertiary)
                     .padding(.vertical, 8)
             } else {
+                let edges = Dictionary(uniqueKeysWithValues: QueueEdgeResolver.rows(
+                    trackIDs: player.queue.map(\.track.id), currentIndex: player.index,
+                    repeatMode: player.repeatMode, smartBlendEnabled: player.smartTransitionsEnabled,
+                    live: player.transitionPresentation).map { ($0.key.position, $0) })
                 List {
                     ForEach(Array(player.queue.enumerated()), id: \.offset) { offset, row in
                         VStack(alignment: .leading, spacing: 4) {
@@ -103,8 +107,8 @@ struct UpNextView: View {
                                      position: offset + 1,
                                      isCurrent: offset == player.index,
                                      queueIndex: offset)
-                            if offset + 1 < player.queue.count {
-                                QueueTransitionConnector(presentation: connectorPresentation(after: offset))
+                            if let edge = edges[offset] {
+                                QueueTransitionConnector(edge: edge).id(edge.key)
                             }
                         }
                             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
@@ -149,11 +153,6 @@ struct UpNextView: View {
             guard case .mix = player.queueSource else { return }
             transitionPrep.prepare(rows: transitionRows, appState: appState, allowsCellular: player.isPlayingMix)
         }
-    }
-
-    /// The active edge shows the live snapshot; later edges say they are planned when up next.
-    private func connectorPresentation(after offset: Int) -> TransitionPresentation {
-        offset == player.index ? player.transitionPresentation : TransitionPresentation(phase: .notPlanned)
     }
 
     private var queueListHeight: CGFloat {
