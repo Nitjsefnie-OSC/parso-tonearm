@@ -256,4 +256,40 @@ final class TransitionSafetyTests: XCTestCase {
                         "heartbeatUptime", "generation", "estimatedBytes"])
         XCTAssertNotNil(UUID(uuidString: op?["operationID"] as? String ?? ""))
     }
+
+    func testReenableKeepsEvidenceAndStatusPersistsAcrossLaunches() {
+        monitor().enter(.planningIncoming)
+        clock.advance(10)
+        TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
+        clock.advance(TransitionLaunchRecovery.maxSuspectAge * 3)
+        TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        let paused = TransitionLaunchRecovery.status(store: store)
+        XCTAssertTrue(paused.isPaused)
+        XCTAssertEqual(paused.interruptedCount, 1)
+        XCTAssertTrue(defaults.bool(forKey: "smartTransitionsEnabled"))
+        XCTAssertEqual(defaults.string(forKey: "perEdge"), "edge-choices")
+        XCTAssertTrue(TransitionLaunchRecovery.reenable(store: store, defaults: defaults))
+        let after = TransitionLaunchRecovery.status(store: store)
+        XCTAssertFalse(after.isPaused)
+        XCTAssertTrue(defaults.bool(forKey: "smartTransitionsEverywhere"))
+        guard case .loaded(let state) = store.load() else { return XCTFail("journal missing") }
+        XCTAssertEqual(state.interruptedCount, 1)
+        XCTAssertNotNil(state.lastInterruptedAt)
+    }
+
+    func testMissingJournalIsNotPaused() {
+        XCTAssertFalse(TransitionLaunchRecovery.status(store: store).isPaused)
+    }
+
+    func testFailedPersistenceKeepsPauseInForce() throws {
+        monitor().enter(.planningIncoming)
+        clock.advance(10)
+        TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        // Make the journal location unwritable by replacing the file with a directory.
+        try FileManager.default.removeItem(at: store.url)
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: true)
+        XCTAssertFalse(TransitionLaunchRecovery.reenable(store: store, defaults: defaults))
+        XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
+    }
 }

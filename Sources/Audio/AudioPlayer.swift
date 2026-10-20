@@ -172,6 +172,9 @@ public final class AudioPlayer: ObservableObject {
     var launchRecoveryDone = false
     /// Drives the one-time "Smart transitions were paused" notice.
     @Published public internal(set) var transitionRecoveryNoticePending = false
+    @Published public internal(set) var transitionRecoveryStatus = TransitionRecoveryStatus(
+        isPaused: false, interruptedCount: 0, lastInterruptedAt: nil)
+    @Published public internal(set) var transitionRecoveryError: String?
     var pendingRestoreSeek: Double?
     /// Injectable persistence funnel: tests can swap in fakes/spies.
     public var persistor = PlaybackPositionPersistor()

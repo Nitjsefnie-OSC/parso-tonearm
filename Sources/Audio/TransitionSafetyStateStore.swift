@@ -194,11 +194,24 @@ public enum TransitionLaunchRecovery {
     }
 
     /// Listener chose "Re-enable": clears recovery and turns only Everywhere back on.
-    public static func reenable(store: TransitionSafetyStateStore, defaults: UserDefaults) {
+    /// Diagnostic evidence (`interruptedCount`, `lastInterruptedAt`) is kept. Returns false, changing
+    /// nothing, when the recovery record could not be persisted, so the pause stays in force.
+    @discardableResult
+    public static func reenable(store: TransitionSafetyStateStore, defaults: UserDefaults) -> Bool {
         var state = store.currentState()
         state.recovery = .none
-        store.save(state)
+        guard store.save(state) else { return false }
         defaults.set(true, forKey: everywhereKey)
+        return true
+    }
+
+    /// What Settings should say about a recovery pause. Reads the journal only; never a crash claim.
+    public static func status(store: TransitionSafetyStateStore) -> TransitionRecoveryStatus {
+        guard case .loaded(let state) = store.load(), state.recovery != .none else {
+            return TransitionRecoveryStatus(isPaused: false, interruptedCount: 0, lastInterruptedAt: nil)
+        }
+        return TransitionRecoveryStatus(isPaused: true, interruptedCount: state.interruptedCount,
+                                        lastInterruptedAt: state.lastInterruptedAt)
     }
 
     /// Listener chose "Keep paused": the safe setting stays and the notice isn't shown again.
@@ -207,6 +220,17 @@ public enum TransitionLaunchRecovery {
         state.recovery = .keptPaused
         store.save(state)
     }
+}
+
+/// A recovery pause awaiting an explicit listener decision. Persisted until re-enabled by the listener.
+public struct TransitionRecoveryStatus: Equatable, Sendable {
+    public var isPaused: Bool
+    public var interruptedCount: Int
+    public var lastInterruptedAt: Date?
+
+    /// Honest about uncertainty: playback was interrupted, the cause is not asserted.
+    public static let message = "Smart Transitions were paused after playback was interrupted."
+    public static let detail = "Your queue, position and other settings are unchanged. Re-enable \"Use for everything\" when you are ready."
 }
 
 /// Writes the sentinel around risky mix-deck work.
