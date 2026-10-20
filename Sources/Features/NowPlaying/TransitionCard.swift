@@ -70,7 +70,8 @@ struct TransitionCard: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(p.accessibilityLabel(outgoingTitle: row(p.outgoingTrackID)?.track.title,
                                                      incomingTitle: row(p.incomingTrackID)?.track.title))
-            .accessibilityValue(p.accessibilityValue)
+            .accessibilityValue([TransitionDisclosure(p, position: player.currentTime)?.spokenSummary,
+                                 p.accessibilityValue].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityHint("Shows why this transition was chosen")
             .accessibilityIdentifier("np.transitionCard")
             .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: p) }
@@ -93,6 +94,17 @@ struct TransitionCard: View {
                     .font(Typography.caption)
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
+            }
+        }
+        if let d = TransitionDisclosure(p, position: player.currentTime) {
+            Text("\(d.section.label) · \(d.matchType)")
+                .font(Typography.caption)
+                .foregroundStyle(Palette.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let progress = d.overlapProgress {
+                ProgressView(value: progress)
+                    .tint(Palette.accent)
+                    .accessibilityHidden(true)
             }
         }
         if !typeSize.isAccessibilitySize, !p.diagramSegments.isEmpty {
