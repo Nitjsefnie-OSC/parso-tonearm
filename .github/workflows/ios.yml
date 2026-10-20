@@ -327,12 +327,27 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
         run: |
-          set -eo pipefail
-          xcrun altool --upload-app \
-            --type ios \
-            --file output/Tonearm.ipa \
-            --apiKey "$APPSTORE_API_KEY_ID" \
-            --apiIssuer "$APPSTORE_API_ISSUER_ID"
+          set -euo pipefail
+          upload_options="$RUNNER_TEMP/TestFlightExportOptions.plist"
+          cp ExportOptions.plist "$upload_options"
+          /usr/libexec/PlistBuddy -c 'Add :destination string upload' "$upload_options"
+          bash .github/scripts/testflight-upload.sh -- \
+            xcodebuild -exportArchive \
+              -archivePath ./build/Tonearm.xcarchive \
+              -exportPath ./output \
+              -exportOptionsPlist "$upload_options" \
+              -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8" \
+              -authenticationKeyID "$APPSTORE_API_KEY_ID" \
+              -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID"
+
+      - name: Upload TestFlight transport diagnostics
+        if: always() && env.HAS_TESTFLIGHT_SECRETS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-transport-${{ github.run_id }}
+          path: ${{ runner.temp }}/testflight-transport.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Record TestFlight delivery
         if: success() && env.HAS_TESTFLIGHT_SECRETS == 'true'
