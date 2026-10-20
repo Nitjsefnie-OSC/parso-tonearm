@@ -35,7 +35,7 @@ final class TransitionPresentationTests: XCTestCase {
         let p = TransitionPresentation.make(plan: nil, preparation: .failed("x"))
         XCTAssertTrue(p.isFallback)
         XCTAssertEqual(p.connectorLabel, "Continuous playback — smart blend unavailable")
-        XCTAssertEqual(p.fallbackDetail, "Smart blend unavailable on this device")
+        XCTAssertEqual(p.fallbackDetail, "No smart blend plan for this transition")
         XCTAssertNil(p.secondsUntilOverlap)
         XCTAssertFalse(p.fallbackDetail?.contains("/") ?? false)
     }
