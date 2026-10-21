@@ -275,22 +275,13 @@ public struct GenrePickerContent: View {
 
             Divider().overlay(Palette.ink.opacity(0.1))
 
-            HStack(spacing: 9) {
-                Image(systemName: model.showsAccountOption
-                      ? "checkmark.square.fill" : "square")
-                    .font(Typography.headline)
-                    .foregroundStyle(model.showsAccountOption
-                                     ? Palette.accent
-                                     : Palette.inkSecondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.showsAccountOption.toggle() }
+            Toggle(isOn: $model.showsAccountOption) {
                 Text("I have a catalogue account (optional) — signing in adds your favourites and playlists. **Browsing and playing work without it.**")
                     .font(Typography.caption)
                     .foregroundStyle(Palette.inkSecondary)
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .accessibilityElement(children: .combine)
+            .toggleStyle(CatalogueCheckboxToggleStyle())
             .accessibilityIdentifier("genre.account.optional")
 
             Text("These tracks are Creative-Commons licensed. Platterhead keeps each track's artist and licence with it, and adds them to your mix's tracklist automatically — so a set you post is properly credited.")
@@ -302,5 +293,29 @@ public struct GenrePickerContent: View {
         .background(Palette.ink.opacity(0.03), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.ink.opacity(0.07), lineWidth: 1))
         .accessibilityIdentifier("genre.summary")
+    }
+}
+
+/// Native `Toggle` rendered as a checkbox: a real switch/button element for
+/// VoiceOver, Switch Control and Voice Control, with a 44pt minimum target and
+/// text that reflows at accessibility Dynamic Type sizes.
+struct CatalogueCheckboxToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .font(Typography.headline)
+                    .foregroundStyle(configuration.isOn ? Palette.accent : Palette.inkSecondary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityHidden(true)
+                configuration.label
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isToggle)
     }
 }
