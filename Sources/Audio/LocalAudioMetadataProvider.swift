@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 /// Technical facts about a local audio file, read from container headers only.
 public struct LocalAudioTechnicalMetadata: Equatable, Codable, Sendable {
@@ -128,7 +129,7 @@ public actor LocalAudioMetadataProvider {
     public private(set) var probeCount = 0
 
     public init(resolver: LocalAssetResolver = .live, cacheURL: URL? = nil,
-                probe: @escaping @Sendable (URL) throws -> LocalAudioTechnicalMetadata = FLACHeaderProbe.probe) {
+                probe: @escaping @Sendable (URL) throws -> LocalAudioTechnicalMetadata = AudioHeaderProbe.probe) {
         self.resolver = resolver
         self.cacheURL = cacheURL
         self.probe = probe
@@ -163,13 +164,27 @@ public actor LocalAudioMetadataProvider {
     /// Returns the metadata, joining any probe already running for the asset.
     /// A cancelled caller gets `.checkingDetails` and never writes the cache.
     public func metadata(for asset: Asset) async -> LocalAudioMetadataOutcome {
-        let key = Self.key(asset)
+        await metadata(key: Self.key(asset)) { [resolver] () throws(LocalMediaFailure) -> ResolvedLocalAsset in
+            try resolver.resolve(asset)
+        }
+    }
+
+    /// App-owned or cached file (no bookmark/lease). `key` must be an opaque stable identity.
+    public func metadata(forFile url: URL, key: String) async -> LocalAudioMetadataOutcome {
+        await metadata(key: key) { () throws(LocalMediaFailure) -> ResolvedLocalAsset in
+            guard FileManager.default.fileExists(atPath: url.path) else { throw .fileMissing }
+            return ResolvedLocalAsset(url: url, backing: .relPath, bookmarkWasStale: false, lease: nil)
+        }
+    }
+
+    private func metadata(key: String,
+                          resolve: () throws(LocalMediaFailure) -> ResolvedLocalAsset) async -> LocalAudioMetadataOutcome {
         let task: Task<LocalAudioMetadataOutcome, Never>
         if let running = inFlight[key] {
             task = running.task
         } else {
             let lease: ResolvedLocalAsset
-            do { lease = try resolver.resolve(asset) } catch { return Self.outcome(for: error) }
+            do { lease = try resolve() } catch { return Self.outcome(for: error) }
             guard let fingerprint = LocalAudioSourceFingerprint.read(lease.url) else {
                 lease.lease?.release()
                 return .temporarilyInaccessible
@@ -231,6 +246,31 @@ public actor LocalAudioMetadataProvider {
     private func persist() {
         guard let cacheURL, let data = try? JSONEncoder().encode(entries) else { return }
         try? data.write(to: cacheURL, options: .atomic)
+    }
+}
+
+/// Container-agnostic header probe: FLAC by its own bounded parser, everything else
+/// (WAV/AIFF/MP3/AAC/M4A/ALAC/CAF) by opening the file with the system reader, which reads
+/// headers only. Never decodes PCM.
+public enum AudioHeaderProbe {
+    public static func probe(url: URL) throws -> LocalAudioTechnicalMetadata {
+        do {
+            return try FLACHeaderProbe.probe(url: url)
+        } catch FLACHeaderProbe.ProbeError.unsupported {
+            let file = try AVAudioFile(forReading: url)
+            let rate = file.processingFormat.sampleRate
+            let channels = Int(file.processingFormat.channelCount)
+            let frames = file.length
+            guard rate > 0, channels > 0, channels <= FLACHeaderProbe.maxChannels, frames > 0 else {
+                throw FLACHeaderProbe.ProbeError.malformed
+            }
+            let duration = Double(frames) / rate
+            guard duration.isFinite, duration <= FLACHeaderProbe.maxDurationSeconds else {
+                throw FLACHeaderProbe.ProbeError.malformed
+            }
+            return LocalAudioTechnicalMetadata(durationSeconds: duration, sampleRate: Int(rate.rounded()),
+                                               channelCount: channels, frameCount: frames, isSeekable: true)
+        }
     }
 }
 
