@@ -22,6 +22,7 @@ struct IndexStatusView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if model.presentation != nil { loadStatusStrip }
                     if let p = model.presentation {
                         summaryCard(p)
                         // Real report: "I don't necessarily want to download
@@ -43,7 +44,7 @@ struct IndexStatusView: View {
                         .padding(.horizontal, 4)
                         countsCard(p)
                         actionsCard(p)
-                    } else if let error = model.errorMessage {
+                    } else if let error = model.errorMessage, model.loadState != nil {
                         VStack(alignment: .leading, spacing: 10) {
                             Label("Sound Index unavailable", systemImage: "exclamationmark.triangle")
                                 .font(Typography.body)
@@ -62,9 +63,12 @@ struct IndexStatusView: View {
                         // like progress. Say what is happening and let the
                         // owner retry.
                         VStack(alignment: .leading, spacing: 10) {
-                            Label("Sound Index status not loaded yet", systemImage: "waveform")
+                            Label(model.loadState == nil ? "Sound Index status not loaded yet" : "Sound Index is busy",
+                                  systemImage: "waveform")
                                 .font(Typography.body)
-                            Text("The status is read in the background and appears here when ready.")
+                            Text(model.loadState == nil
+                                 ? "The status is read in the background and appears here when ready."
+                                 : "The status database is temporarily busy. Retrying automatically.")
                                 .font(Typography.caption)
                                 .foregroundStyle(Palette.inkSecondary)
                             Button("Retry") { Task { await model.refresh() } }
@@ -128,6 +132,36 @@ struct IndexStatusView: View {
     }
 
     // MARK: - Cards
+
+    /// Honest stage line shown above the last good data: never replaces it.
+    @ViewBuilder private var loadStatusStrip: some View {
+        let (text, icon): (LocalizedStringKey, String) = {
+            switch model.loadState {
+            case nil: return ("Up to date", "checkmark.circle")
+            case .busy?, .timedOut?: return ("Temporarily busy — showing last known status", "clock.badge.exclamationmark")
+            case .retryingSoon?: return ("Retrying — showing last known status", "arrow.clockwise")
+            case .failed?: return ("Unavailable — showing last known status", "exclamationmark.triangle")
+            case .loaded?, .cancelled?: return ("Up to date", "checkmark.circle")
+            }
+        }()
+        HStack(spacing: 8) {
+            Image(systemName: icon).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text)
+                if let updated = model.lastUpdated {
+                    Text("Last updated \(updated.formatted(date: .omitted, time: .standard))")
+                }
+            }
+            Spacer(minLength: 0)
+            if model.loadState != nil {
+                Button("Retry") { Task { await model.refresh() } }
+                    .disabled(model.isLoading)
+            }
+        }
+        .font(Typography.caption)
+        .foregroundStyle(Palette.inkSecondary)
+        .accessibilityElement(children: .combine)
+    }
 
     private func summaryCard(_ p: IndexStatusPresentation) -> some View {
         VStack(alignment: .leading, spacing: 8) {
