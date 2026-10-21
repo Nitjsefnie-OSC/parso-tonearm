@@ -23,67 +23,63 @@ final class IndexStatusModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published var isBusy = false
 
+    /// Why the last refresh did not produce fresh data. `nil` once loaded.
+    /// The last good `snapshot`/`presentation` and `lastUpdated` are kept
+    /// while this is set, so the screen never blanks or spins.
+    @Published private(set) var loadState: SnapshotLoadState?
+    @Published private(set) var isLoading = false
+    @Published private(set) var lastUpdated: Date?
+
     private let controller: DiscoveryRuntimeController
+    private let coordinator: SnapshotCoordinator<IndexStatusSnapshot>
     private var pollTask: Task<Void, Never>?
-
-    private enum RefreshError: Error {
-        case timedOut
-    }
-
-    /// A timeout must not wait for the database operation it is timing out.
-    /// `withThrowingTaskGroup` is structured: cancelling a child that is
-    /// blocked in SQLite still makes the group wait for that child, which is
-    /// exactly how the Sound Index screen got stuck on its first spinner.
-    private final class RefreshRace: @unchecked Sendable {
-        private let lock = NSLock()
-        private var didFinish = false
-
-        func claim() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !didFinish else { return false }
-            didFinish = true
-            return true
-        }
-    }
 
     init(controller: DiscoveryRuntimeController = .shared) {
         self.controller = controller
+        self.coordinator = SnapshotCoordinator { [controller] in
+            try await controller.statusSnapshotOrThrow()
+        }
+    }
+
+    deinit {
+        pollTask?.cancel()
+        let coordinator = coordinator
+        Task { await coordinator.shutdown() }
     }
 
     /// Whether the compact Library banner should be shown at all.
     var showsBanner: Bool { presentation?.showsBanner ?? false }
 
+    /// Reads through the single-flight coordinator: concurrent callers join
+    /// one read, and a blocked read is bounded rather than stacked.
     func refresh() async {
-        do {
-            guard let snap = try await statusSnapshotWithTimeout() else {
-                errorMessage = controller.lastStatusError ?? String(localized: "The Sound Index status could not be read.")
-                return
-            }
-            errorMessage = nil
+        isLoading = true
+        defer { isLoading = false }
+        let outcome = await coordinator.load()
+        if outcome.state == .cancelled { return }
+        if let snap = outcome.value {
             snapshot = snap
+            lastUpdated = outcome.updatedAt
             presentation = IndexStatusPresentation.make(from: snap)
-        } catch RefreshError.timedOut {
-            errorMessage = String(localized: "The Sound Index status timed out. Try again.")
-        } catch {
-            errorMessage = String(localized: "The Sound Index status could not be read: \(error.localizedDescription)")
+        }
+        switch outcome.state {
+        case .loaded:
+            loadState = nil
+            errorMessage = nil
+        case .failed(let message):
+            loadState = outcome.state
+            errorMessage = controller.lastStatusError ?? message
+        default:
+            loadState = outcome.state
+            errorMessage = nil
         }
     }
 
-    private func statusSnapshotWithTimeout() async throws -> IndexStatusSnapshot? {
-        let race = RefreshRace()
-        return try await withCheckedThrowingContinuation { continuation in
-            Task { @MainActor [controller] in
-                let snapshot = await controller.statusSnapshot()
-                guard race.claim() else { return }
-                continuation.resume(returning: snapshot)
-            }
-            Task { [race] in
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled, race.claim() else { return }
-                continuation.resume(throwing: RefreshError.timedOut)
-            }
-        }
+    /// Discards in-flight/older data after a state change (control action,
+    /// build completion) so a late old read cannot overwrite the newer one.
+    func invalidateAndRefresh() async {
+        await coordinator.invalidate()
+        await refresh()
     }
 
     /// Begin a light poll while a status view is on screen (plan §10.5:
@@ -106,28 +102,28 @@ final class IndexStatusModel: ObservableObject {
     func setPaused(_ paused: Bool) async {
         isBusy = true
         await controller.setPaused(paused)
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
     }
 
     func setChargingOnly(_ on: Bool) async {
         isBusy = true
         await controller.setChargingOnly(on)
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
     }
 
     func setRemoteIndexingEnabled(_ on: Bool) async {
         isBusy = true
         await controller.setRemoteIndexingEnabled(on)
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
     }
 
     func setRemoteIndexingWiFiOnly(_ on: Bool) async {
         isBusy = true
         await controller.setRemoteIndexingWiFiOnly(on)
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
     }
 
@@ -140,7 +136,7 @@ final class IndexStatusModel: ObservableObject {
     func retryFailed() async {
         isBusy = true
         _ = await controller.retryFailed()
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
     }
 
@@ -151,7 +147,7 @@ final class IndexStatusModel: ObservableObject {
     func enqueueUnindexedTracks() async -> Int {
         isBusy = true
         let count = await controller.enqueueUnindexedTracks()
-        await refresh()
+        await invalidateAndRefresh()
         isBusy = false
         return count
     }

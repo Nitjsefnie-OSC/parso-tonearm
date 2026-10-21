@@ -550,6 +550,18 @@ final class DiscoveryRuntimeController {
         }
     }
 
+    /// Throwing variant for `SnapshotCoordinator`, which needs the failure.
+    func statusSnapshotOrThrow() async throws -> IndexStatusSnapshot {
+        let assembly = await makeAssembly()
+        do {
+            lastStatusError = nil
+            return try await assembly.statusSnapshot()
+        } catch {
+            lastStatusError = String(describing: error)
+            throw error
+        }
+    }
+
     /// "Retry failed" action (plan §10 action 4).
     @discardableResult
     func retryFailed() async -> Int {
