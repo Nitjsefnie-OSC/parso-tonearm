@@ -134,11 +134,57 @@ extension AudioPlayer: MixDeckHost {
         guard result != queueOccurrences || oldOccurrences.count != queueOccurrences.count else { return }
         queueOccurrences = result
         transitionExecution.advanceGeneration(order: result, loops: repeatMode == .all)
+        pruneNoBlendEdges()
+    }
+
+    /// Drops "play without blend" requests for pairs that are no longer adjacent in the queue.
+    private func pruneNoBlendEdges() {
+        guard !noBlendEdges.isEmpty else { return }
+        var adjacent = Set<TransitionEdgeKey>()
+        for i in queueOccurrences.indices {
+            let next = i + 1 < queueOccurrences.count ? i + 1 : (repeatMode == .all ? 0 : nil)
+            if let next { adjacent.insert(TransitionEdgeKey(from: queueOccurrences[i], to: queueOccurrences[next])) }
+        }
+        noBlendEdges.formIntersection(adjacent)
+    }
+
+    /// Makes exactly the edge `key` play sequentially. False when it is not an adjacent queue
+    /// pair or is already audible; no other edge is touched.
+    @discardableResult
+    public func playWithoutBlend(_ key: TransitionEdgeKey) -> Bool {
+        guard let from = queueOccurrences.firstIndex(of: key.from), let to = mixDecksSuccessor(of: from),
+              queueOccurrences[to] == key.to else { return false }
+        if let phase = transitionExecution.snapshot(for: key)?.phase, phase == .overlapping || phase == .handedOff {
+            return false // already audible: a blend in progress is never torn out
+        }
+        noBlendEdges.insert(key)
+        if from == index { mixDecks?.upcomingChanged() } // replaces a blend that has not started
+        return true
+    }
+
+    /// Retries an edge the renderer denied or cancelled. Only an edge leaving the current track
+    /// can be retried now; the others are retried by the scheduler when they become next.
+    @discardableResult
+    public func retryTransition(_ key: TransitionEdgeKey) -> Bool {
+        guard let from = queueOccurrences.firstIndex(of: key.from), let to = mixDecksSuccessor(of: from),
+              queueOccurrences[to] == key.to, transitionExecution.snapshot(for: key)?.isTerminal == true else { return false }
+        noBlendEdges.remove(key)
+        smartBlendDeniedTrackID = nil
+        if from == index {
+            mixDecks?.upcomingChanged()
+            preloadNextItem(allowingMixDecks: true)
+        }
+        return true
+    }
+
+    private func mixDecksSuccessor(of slot: Int) -> Int? {
+        slot + 1 < queueOccurrences.count ? slot + 1 : (repeatMode == .all && queueOccurrences.count > 1 ? 0 : nil)
     }
 
     /// A replacement queue shares no identities with the old one, even for the same tracks.
     func replaceQueueOccurrences() {
         transitionExecution.cancelAll(reason: .replaced)
+        noBlendEdges = []
         queueOccurrences = queue.map { _ in QueueOccurrenceID() }
         transitionExecution.advanceGeneration(order: queueOccurrences, loops: repeatMode == .all)
     }
@@ -194,6 +240,8 @@ extension AudioPlayer: MixDeckHost {
         } else {
             return nil
         }
+        if let from = mixDecksOccurrence(at: current), let to = mixDecksOccurrence(at: next),
+           noBlendEdges.contains(TransitionEdgeKey(from: from, to: to)) { return nil }
         // An unplayable or Wi-Fi-only next track isn't blended into; when the
         // current one ends, next() skips it as it would without the decks.
         guard let asset = queue[next].asset, asset.unsupportedReason == nil,

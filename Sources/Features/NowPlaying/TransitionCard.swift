@@ -182,35 +182,3 @@ struct PhaseRail: View {
         .accessibilityHidden(true)
     }
 }
-
-/// Connector shown between adjacent queue rows. At least 44 pt tall; label plus a shape glyph.
-struct QueueTransitionConnector: View {
-    let edge: QueueEdgeRow
-    @State private var showDetail = false
-
-    private var presentation: TransitionPresentation { edge.presentation }
-    private var timeline: QueueEdgeTimeline { edge.timeline }
-
-    private var glyph: String {
-        switch presentation.phase {
-        case .fallback: "arrow.right"
-        case .preparing: "hourglass"
-        case .notPlanned: "ellipsis"
-        default: presentation.actualStyle == .gapless ? "equal" : "waveform.path"
-        }
-    }
-
-    var body: some View {
-        Button { showDetail = true } label: {
-            Label(edge.summary, systemImage: glyph)
-                .font(Typography.caption)
-                .foregroundStyle(Palette.inkSecondary)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(edge.accessibilityLabel)
-        .accessibilityHint("Shows why this transition was chosen")
-        .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: presentation, note: edge.reason) }
-    }
-}
