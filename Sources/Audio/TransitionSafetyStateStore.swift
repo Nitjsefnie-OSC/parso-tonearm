@@ -15,6 +15,12 @@ public enum TransitionRecoveryState: String, Codable, Sendable, Equatable {
     case none, noticePending, keptPaused
 }
 
+/// What launch must do if this operation is found unresolved.
+public enum TransitionRecoveryMode: String, Codable, Sendable, Equatable {
+    /// Disable Smart Transitions Everywhere and hand off plainly until the listener resolves it.
+    case plainHandoffUntilResolved
+}
+
 /// The record of one risky mix transition/decode operation. Privacy-safe by
 /// construction: opaque ids, phases, timestamps and numbers only — never a
 /// title, URL, path, bookmark or artwork.
@@ -30,6 +36,8 @@ public struct TransitionSafetyOperation: Codable, Sendable, Equatable {
     public var heartbeatUptime: TimeInterval
     public var generation: Int
     public var estimatedBytes: Int64?
+    /// Recovery required if the record is found unresolved. Absent in older records.
+    public var recoveryMode: TransitionRecoveryMode?
 }
 
 public struct TransitionSafetyState: Codable, Sendable, Equatable {
@@ -65,7 +73,9 @@ public struct TransitionSafetyStateStore: Sendable {
     }
 
     public func load() -> LoadResult {
-        guard let data = try? Data(contentsOf: url) else { return .missing }
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+        // Present but unreadable (protected, corrupt, a directory) is never "missing".
+        guard let data = try? Data(contentsOf: url) else { return .unreadable }
         guard let state = try? JSONDecoder().decode(TransitionSafetyState.self, from: data),
               state.schemaVersion == TransitionSafetyState.currentVersion else { return .unreadable }
         return .loaded(state)
@@ -88,19 +98,11 @@ public struct TransitionSafetyStateStore: Sendable {
 /// What a launch learned about the previous run's risky transition work.
 /// UI-agnostic: a separate policy decides what to do with it.
 public enum TransitionRecoveryAssessment: Equatable, Sendable {
-    public enum Context: String, Equatable, Sendable {
-        /// Same boot, within `TransitionLaunchRecovery.maxSuspectAge` of the last heartbeat (monotonic).
-        case recent
-        /// Same boot but long ago, so unlikely to be the previous launch.
-        case stale
-        /// Written on an earlier boot.
-        case afterReboot
-    }
     /// No unresolved risky work. An ordinary force-quit while stable lands here.
     case clean
     /// Risky work was unresolved. The cause is unknown (force-quit, jetsam, crash, power loss):
     /// never reported as a crash without evidence.
-    case interrupted(operationID: String, phase: TransitionSafetyPhase, context: Context)
+    case interrupted(operationID: String, phase: TransitionSafetyPhase)
     /// Interrupted, and the caller supplied independent crash evidence for this operation ID.
     case confirmedCrash(operationID: String, phase: TransitionSafetyPhase)
     /// The journal could not be read or decoded; risk can't be ruled out.
@@ -123,8 +125,6 @@ public struct TransitionSafetyClock: Sendable {
 
 /// Launch-time inspection of the sentinel.
 public enum TransitionLaunchRecovery {
-    /// A sentinel older than this can't plausibly be from the prior launch.
-    public static let maxSuspectAge: TimeInterval = 10 * 60
     public static let everywhereKey = "smartTransitionsEverywhere"
 
     public struct Outcome: Equatable, Sendable {
@@ -153,44 +153,43 @@ public enum TransitionLaunchRecovery {
             assessment = .journalUnreadable
         case .loaded(let loaded):
             state = loaded
-            if let op = loaded.operation {
-                if op.isActive, op.resolution == nil {
-                    let context = context(of: op, clock: clock)
-                    suspect = context == .recent
-                    assessment = confirmedCrashOperationIDs.contains(op.operationID)
-                        ? .confirmedCrash(operationID: op.operationID, phase: op.phase)
-                        : .interrupted(operationID: op.operationID, phase: op.phase, context: context)
-                    if case .confirmedCrash = assessment { suspect = true }
-                }
-                state.operation = nil           // retire: a stale or suspect record is consumed once
+            if let op = loaded.operation, op.isActive, op.resolution == nil {
+                // Unresolved risky work never expires: not by age, reboot or wall-clock change.
+                // The record stays until the listener resolves the recovery.
+                assessment = confirmedCrashOperationIDs.contains(op.operationID)
+                    ? .confirmedCrash(operationID: op.operationID, phase: op.phase)
+                    : .interrupted(operationID: op.operationID, phase: op.phase)
+                suspect = true
+            } else if state.recovery != .none {
+                suspect = true      // a recovery the listener has not resolved still holds Everywhere off
+            } else if loaded.operation != nil {
+                state.operation = nil   // acknowledged terminal record: clear it
             }
         }
         if suspect {
+            // Disable the risky path before anything else can restore queue/player work.
             if defaults.bool(forKey: everywhereKey) { defaults.set(false, forKey: everywhereKey) }
-            state.interruptedCount += 1
-            state.lastInterruptedAt = clock.now()
-            if state.recovery != .keptPaused { state.recovery = .noticePending }
-            if !store.save(state) { assessment = .journalWriteFailed }
+            if assessment != .clean {
+                let alreadyCounted: Bool
+                if case .loaded(let before) = store.load(), before.recovery != .none,
+                   before.operation?.operationID == state.operation?.operationID { alreadyCounted = true }
+                else { alreadyCounted = false }
+                if !alreadyCounted {
+                    state.interruptedCount += 1
+                    state.lastInterruptedAt = clock.now()
+                }
+            }
+            if state.recovery == .none { state.recovery = .noticePending }
+            if case .loaded(let before) = store.load(), before == state {
+                // Nothing new to persist: repeated launches are idempotent.
+            } else if !store.save(state) { assessment = .journalWriteFailed }
         } else if case .loaded(let before) = store.load(), before != state {
+            // The terminal clear failed: stay in safe mode rather than pretend it ended.
             if !store.save(state) { assessment = .journalWriteFailed }
         }
         let failedWrite = assessment == .journalWriteFailed
         return Outcome(plainPlayback: suspect || failedWrite,
                        showsNotice: state.recovery == .noticePending, assessment: assessment)
-    }
-
-    /// Classifies an unresolved record using uptime only, so wall-clock changes can't affect it.
-    /// A reboot resets uptime: such a record is from a previous boot, not an interrupted launch.
-    static func context(of op: TransitionSafetyOperation,
-                        clock: TransitionSafetyClock) -> TransitionRecoveryAssessment.Context {
-        let elapsed = clock.uptime() - op.heartbeatUptime
-        guard elapsed >= 0 else { return .afterReboot }
-        return elapsed <= maxSuspectAge ? .recent : .stale
-    }
-
-    static func isSuspect(_ op: TransitionSafetyOperation, clock: TransitionSafetyClock) -> Bool {
-        guard op.isActive, op.resolution == nil else { return false }
-        return context(of: op, clock: clock) == .recent
     }
 
     /// Listener chose "Re-enable": clears recovery and turns only Everywhere back on.
@@ -200,6 +199,7 @@ public enum TransitionLaunchRecovery {
     public static func reenable(store: TransitionSafetyStateStore, defaults: UserDefaults) -> Bool {
         var state = store.currentState()
         state.recovery = .none
+        state.operation = nil       // the explicit safe resolution of the unresolved record
         guard store.save(state) else { return false }
         defaults.set(true, forKey: everywhereKey)
         return true
@@ -207,6 +207,13 @@ public enum TransitionLaunchRecovery {
 
     /// What Settings should say about a recovery pause. Reads the journal only; never a crash claim.
     public static func status(store: TransitionSafetyStateStore) -> TransitionRecoveryStatus {
+        switch store.load() {
+        case .missing:
+            return TransitionRecoveryStatus(isPaused: false, interruptedCount: 0, lastInterruptedAt: nil)
+        case .unreadable:
+            return TransitionRecoveryStatus(isPaused: true, interruptedCount: 0, lastInterruptedAt: nil)
+        case .loaded: break
+        }
         guard case .loaded(let state) = store.load(), state.recovery != .none else {
             return TransitionRecoveryStatus(isPaused: false, interruptedCount: 0, lastInterruptedAt: nil)
         }
@@ -257,6 +264,19 @@ public final class TransitionSafetyMonitor {
         state.operation = nil
     }
 
+    /// True when the journal holds anything unresolved or unreadable: risky work must not start.
+    private var journalBlocksRiskyWork: Bool {
+        switch store.load() {
+        case .missing: return false
+        case .unreadable: return true
+        case .loaded(let onDisk):
+            if onDisk.recovery != .none { return true }
+            if let op = onDisk.operation, op.isActive, op.resolution == nil,
+               op.operationID != state.operation?.operationID { return true }
+            return false
+        }
+    }
+
     public var isActive: Bool { state.operation?.isActive == true }
     public var phase: TransitionSafetyPhase? { isActive ? state.operation?.phase : nil }
 
@@ -269,6 +289,7 @@ public final class TransitionSafetyMonitor {
     @discardableResult
     public func enter(_ phase: TransitionSafetyPhase, estimatedBytes: Int64? = nil) -> Bool {
         deferredResolution = nil
+        if state.operation?.isActive != true, journalBlocksRiskyWork { lastWriteFailed = true; return false }
         let now = clock.now(), up = clock.uptime()
         let previous = state.operation
         if var op = state.operation, op.isActive {
@@ -282,7 +303,8 @@ public final class TransitionSafetyMonitor {
             state.operation = TransitionSafetyOperation(
                 operationID: UUID().uuidString, phase: phase, isActive: true, resolution: nil,
                 startedAt: now, heartbeatAt: now, startedUptime: up, heartbeatUptime: up,
-                generation: generation, estimatedBytes: estimatedBytes)
+                generation: generation, estimatedBytes: estimatedBytes,
+                recoveryMode: .plainHandoffUntilResolved)
         }
         if write(up) { return true }
         state.operation = previous      // not journaled, so not active: the caller must not start the work
@@ -318,17 +340,20 @@ public final class TransitionSafetyMonitor {
     public func resolve(_ resolution: TransitionSafetyResolution) {
         guard var op = state.operation, op.isActive else { return }
         if activeWorkers > 0 { deferredResolution = resolution; return }
+        let unresolved = op
         op.isActive = false
         op.resolution = resolution
         op.heartbeatAt = clock.now()
         op.heartbeatUptime = clock.uptime()
         state.operation = op
-        write(op.heartbeatUptime)
+        // Not persisted means not acknowledged: keep the record active so safe mode holds.
+        if !write(op.heartbeatUptime) { state.operation = unresolved }
     }
 
     @discardableResult
     private func write(_ up: TimeInterval) -> Bool {
         lastWrite = up
+        // A listener or launch recovery record on disk is never overwritten with a stale view.
         // Preserve recovery bookkeeping another writer (the listener's choice) may have changed.
         let onDisk = store.currentState()
         state.recovery = onDisk.recovery

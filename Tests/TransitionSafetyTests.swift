@@ -52,7 +52,7 @@ final class TransitionSafetyTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "perEdge"), "edge-choices")
         guard case .loaded(let state) = store.load() else { return XCTFail() }
         XCTAssertEqual(state.interruptedCount, 1)
-        XCTAssertNil(state.operation)
+        XCTAssertNotNil(state.operation, "unresolved record is retained until the listener resolves it")
     }
 
     func testPlayerRestoreChoosesPlainPlayback() {
@@ -75,20 +75,57 @@ final class TransitionSafetyTests: XCTestCase {
         }
     }
 
-    func testStaleSentinelIsRetiredWithoutRecovery() {
-        monitor().enter(.overlap)
-        clock.advance(TransitionLaunchRecovery.maxSuspectAge + 1)
-        let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
-        XCTAssertFalse(outcome.plainPlayback)
-        XCTAssertTrue(defaults.bool(forKey: "smartTransitionsEverywhere"))
+    func testUnresolvedSentinelNeverExpiresByAgeRebootOrClockJump() {
+        let ages: [TimeInterval] = [60, 3_600, 3 * 86_400]
+        for age in ages {
+            try? FileManager.default.removeItem(at: store.url)
+            defaults.set(true, forKey: "smartTransitionsEverywhere")
+            monitor().enter(.overlap)
+            clock.advance(age)
+            let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+            XCTAssertTrue(outcome.plainPlayback, "age \(age)")
+            XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
+        }
+        let rebooted = TransitionSafetyClock(now: { Date(timeIntervalSince1970: 1) }, uptime: { 1 })
+        try? FileManager.default.removeItem(at: store.url)
+        monitor().enter(.scheduled)
+        XCTAssertTrue(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).plainPlayback)
+        // The record survives every relaunch until the listener resolves it.
+        XCTAssertTrue(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).plainPlayback)
         guard case .loaded(let state) = store.load() else { return XCTFail() }
-        XCTAssertNil(state.operation)
+        XCTAssertNotNil(state.operation)
+        XCTAssertEqual(state.operation?.recoveryMode, .plainHandoffUntilResolved)
     }
 
-    func testRebootedSentinelIsNotSuspect() {
-        monitor().enter(.scheduled)
-        let rebooted = TransitionSafetyClock(now: { [clock] in clock!.now }, uptime: { 1 })
-        XCTAssertFalse(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).plainPlayback)
+    func testRiskyWorkRefusedWhileRecoveryUnresolved() {
+        monitor().enter(.decodingCurrent)
+        TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        XCTAssertFalse(monitor().enter(.startingCurrent), "blocked until explicit resolution")
+        TransitionLaunchRecovery.keepPaused(store: store)
+        XCTAssertFalse(monitor().enter(.startingCurrent), "keep safe playback stays blocked")
+        XCTAssertTrue(TransitionLaunchRecovery.reenable(store: store, defaults: defaults))
+        XCTAssertTrue(monitor().enter(.startingCurrent))
+    }
+
+    func testFailedTerminalAcknowledgementKeepsRecordActive() throws {
+        let m = monitor()
+        m.enter(.decodingCurrent)
+        try FileManager.default.removeItem(at: store.url)
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: true)
+        m.resolve(.completed)
+        XCTAssertTrue(m.isActive, "unacknowledged terminal state must not look ended")
+        XCTAssertTrue(m.lastWriteFailed)
+    }
+
+    func testFailedTerminalClearAtLaunchStaysSafe() throws {
+        let m = monitor()
+        m.enter(.overlap)
+        m.resolve(.completed)
+        // Make the save fail: replace the file's directory with a read-only one.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+        let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        if outcome.assessment == .journalWriteFailed { XCTAssertTrue(outcome.plainPlayback) }
     }
 
     func testReenableAndKeepPaused() {
@@ -96,11 +133,11 @@ final class TransitionSafetyTests: XCTestCase {
         TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
         TransitionLaunchRecovery.keepPaused(store: store)
         XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
-        // A second interruption after Keep paused pauses again but doesn't re-show the notice.
-        monitor().enter(.startingCurrent)
+        // Keep paused stays paused across relaunch without re-showing the notice.
         let again = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
         XCTAssertTrue(again.plainPlayback)
         XCTAssertFalse(again.showsNotice)
+        XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
         TransitionLaunchRecovery.reenable(store: store, defaults: defaults)
         XCTAssertTrue(defaults.bool(forKey: "smartTransitionsEverywhere"))
         guard case .loaded(let state) = store.load() else { return XCTFail() }
@@ -146,7 +183,7 @@ final class TransitionSafetyTests: XCTestCase {
         _ = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
         let data = try? Data(contentsOf: store.url)
         let second = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
-        XCTAssertFalse(second.plainPlayback)
+        XCTAssertTrue(second.plainPlayback, "still unresolved")
         XCTAssertTrue(second.showsNotice, "notice stays pending until the listener answers")
         XCTAssertEqual(try? Data(contentsOf: store.url), data, "no write on a repeated launch")
     }
@@ -168,7 +205,7 @@ final class TransitionSafetyTests: XCTestCase {
             monitor().enter(phase)
             clock.advance(3)
             let outcome = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
-            guard case .interrupted(_, let seen, .recent) = outcome.assessment else {
+            guard case .interrupted(_, let seen) = outcome.assessment else {
                 return XCTFail("\(phase): \(outcome.assessment)")
             }
             XCTAssertEqual(seen, phase)
@@ -201,7 +238,7 @@ final class TransitionSafetyTests: XCTestCase {
         m.resolve(.completed)
         guard case .loaded(let during) = store.load() else { return XCTFail() }
         XCTAssertEqual(during.operation?.isActive, true, "decode still running")
-        clock.advance(TransitionLaunchRecovery.maxSuspectAge * 2)
+        clock.advance(2 * 3_600)
         m.heartbeat()
         m.workerExited()
         guard case .loaded(let after) = store.load() else { return XCTFail() }
@@ -209,21 +246,26 @@ final class TransitionSafetyTests: XCTestCase {
         XCTAssertEqual(after.operation?.resolution, .completed)
     }
 
-    func testRebootAndClockChangeAreClassifiedByUptime() {
-        monitor().enter(.planningIncoming)
-        let skewed = TransitionSafetyClock(now: { Date(timeIntervalSince1970: 1) }, uptime: { [clock] in clock!.up + 2 })
-        guard case .interrupted(_, _, .recent) = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: skewed).assessment
-        else { return XCTFail("clock change must not matter") }
+    func testRebootAndClockChangeStillInterrupted() {
         monitor().enter(.planningIncoming)
         let rebooted = TransitionSafetyClock(now: { [clock] in clock!.now + 86_400 }, uptime: { 1 })
-        guard case .interrupted(_, _, .afterReboot) = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).assessment
+        guard case .interrupted = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: rebooted).assessment
         else { return XCTFail() }
     }
 
-    func testRepeatedLaunchAssessmentIsIdempotent() {
+    func testRepeatedLaunchStaysSafeAndDoesNotRecount() {
         monitor().enter(.decodingCurrent)
         _ = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
-        XCTAssertEqual(TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock).assessment, .clean)
+        let second = TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
+        XCTAssertTrue(second.plainPlayback)
+        guard case .loaded(let state) = store.load() else { return XCTFail() }
+        XCTAssertEqual(state.interruptedCount, 1)
+    }
+
+    func testUnreadableExistingJournalIsNotMissing() throws {
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: true)
+        XCTAssertEqual(store.load(), .unreadable)
+        XCTAssertTrue(TransitionLaunchRecovery.status(store: store).isPaused)
     }
 
     func testUnreadableJournalAssessment() throws {
@@ -253,7 +295,7 @@ final class TransitionSafetyTests: XCTestCase {
         let op = object?["operation"] as? [String: Any]
         XCTAssertEqual(Set(op?.keys.map { $0 } ?? []),
                        ["operationID", "phase", "isActive", "startedAt", "heartbeatAt", "startedUptime",
-                        "heartbeatUptime", "generation", "estimatedBytes"])
+                        "heartbeatUptime", "generation", "estimatedBytes", "recoveryMode"])
         XCTAssertNotNil(UUID(uuidString: op?["operationID"] as? String ?? ""))
     }
 
@@ -262,7 +304,7 @@ final class TransitionSafetyTests: XCTestCase {
         clock.advance(10)
         TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
         XCTAssertFalse(defaults.bool(forKey: "smartTransitionsEverywhere"))
-        clock.advance(TransitionLaunchRecovery.maxSuspectAge * 3)
+        clock.advance(3 * 86_400)
         TransitionLaunchRecovery.run(store: store, defaults: defaults, clock: clock.clock)
         let paused = TransitionLaunchRecovery.status(store: store)
         XCTAssertTrue(paused.isPaused)
