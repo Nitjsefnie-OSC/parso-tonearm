@@ -25,12 +25,22 @@ enum MixTrackLoaderError: Error, LocalizedError, Equatable {
     case download(Int)
     case decode(String)
     case empty
+    /// Scoped access to the file was refused: nothing is decoded.
+    case accessDenied
+    /// The decoder cannot position within this container, so a windowed decode is impossible.
+    /// There is no whole-file fallback; the edge plays sequentially.
+    case unsupportedBoundedDecode(AudioContainer)
+    /// Longer than the resident-PCM ceiling the mix decks accept (seconds).
+    case tooLong(Int)
 
     var errorDescription: String? {
         switch self {
         case .download(let status): return "Download failed (HTTP \(status))"
         case .decode(let reason): return "Could not decode the track: \(reason)"
         case .empty: return "The track has no audio"
+        case .accessDenied: return "Access to the file was denied"
+        case .unsupportedBoundedDecode: return "This format cannot be blended; it plays without a blend"
+        case .tooLong: return "The track is too long to blend; it plays without a blend"
         }
     }
 }
@@ -48,8 +58,8 @@ enum MixTrackLoader {
         let decoded: PCMBuffer
         switch source {
         case .file(let url, let container, let scoped):
-            let access = scoped && url.startAccessingSecurityScopedResource()
-            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let lease = try SourceAccessLease(url: url, securityScoped: scoped)
+            defer { lease.release() }
             decoded = try decode(url, container: container)
         case .remote(let url, let headers, let container, let cacheKey):
             let file = try await download(url, headers: headers, container: container, progress: progress)
@@ -75,8 +85,15 @@ enum MixTrackLoader {
                              analysis: BlendAnalyzer.analyze(audio, approximateBPM: bpm))
     }
 
-    /// AVFoundation picks a parser from the file extension; a cache blob has
-    /// none, so it is read through a link that carries one.
+    /// Longest track the mix decks hold as resident PCM. Beyond it the edge plays sequentially.
+    static let maxResidentSeconds = 900.0
+    /// Frames per windowed read while filling the deck PCM; the only transient allocation.
+    static let decodeChunkFrames = 1 << 16
+
+    /// Decodes through the windowed range source, `decodeChunkFrames` at a time: no whole-file read, no
+    /// whole-file decoder copy. A container that cannot seek throws `unsupportedBoundedDecode`.
+    /// AVFoundation picks a parser from the file extension; a cache blob has none, so it is read
+    /// through a link that carries one.
     static func decode(_ url: URL, container: AudioContainer) throws -> PCMBuffer {
         var readable = url
         var link: URL?
@@ -88,12 +105,37 @@ enum MixTrackLoader {
             link = named
         }
         defer { if let link { try? FileManager.default.removeItem(at: link) } }
-        do {
-            return try AudioFileReader(url: readable, container: container).readAll()
-        } catch {
-            throw MixTrackLoaderError.decode(String(describing: error))
+        let source = try FileRangeAudioSource.open(url: readable, container: container)
+        let seconds = Double(source.totalFrames) / source.sampleRate
+        guard seconds <= maxResidentSeconds else { throw tooLongError(seconds) }
+        let total = Int(source.totalFrames)
+        let channels = source.channelCount
+        let format = AudioFormat(sampleRate: source.sampleRate, channelCount: channels)
+        var out = PCMBuffer(format: format, capacity: total)
+        var filled = 0
+        while filled < total {
+            try Task.checkCancellation()
+            let pcm = try source.decodeRange(startFrame: Int64(filled), frameCount: decodeChunkFrames)
+            let frames = pcm.count / channels
+            guard frames > 0 else { break }
+            for c in 0..<channels {
+                let channel = out.channel(c)
+                for f in 0..<frames { channel[filled + f] = pcm[f * channels + c] }
+            }
+            filled += frames
         }
+        if filled < total {              // the header over-reported (VBR estimate): keep what decoded
+            let trimmed = PCMBuffer(format: format, capacity: filled)
+            for c in 0..<channels {
+                let from = out.channel(c), to = trimmed.channel(c)
+                for f in 0..<filled { to[f] = from[f] }
+            }
+            out = trimmed
+        }
+        return out
     }
+
+    private static func tooLongError(_ seconds: Double) -> MixTrackLoaderError { .tooLong(Int(seconds)) }
 
     static func download(_ url: URL, headers: [String: String], container: AudioContainer,
                          progress: @escaping @Sendable (Stage) -> Void) async throws -> URL {
