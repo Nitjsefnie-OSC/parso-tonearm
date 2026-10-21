@@ -99,6 +99,49 @@ Tonearm GitHub release; only app-owned/CC0 curated packs use this publisher.
    Do not label an AVPlayer sequential queue as a starter *smart* blend. A
    deliberate "play as playlist" action may be offered separately.
 
+## Streaming MixDeck migration
+
+Production MixDecks currently require a full `PCMBuffer` and therefore download
+and decode an entire remote track before `MixEngine.prepare`. Tonearm already
+has the replacement realtime primitive: `BoundedDeckMixer` owns two
+`BoundedDeckBuffer`s, has a shared sample clock, never performs I/O on the
+render thread, rejects stale generations after seek/reuse, and delays an
+overlap until the incoming deck has enough audio. It is covered by offline
+tests but is not yet connected to `MixDeckOutput`.
+
+1. Add an `HTTPRangeAACSource` actor. It owns URLSession requests, a
+   content-addressed sparse on-disk cache, HTTP validators, cancellation, and
+   an AAC frame/byte index generated with the release pack. Network work only
+   writes verified bytes into that cache; it never runs in the render callback.
+2. Add a decoder worker per active deck. It reads only verified local ranges,
+   converts AAC to 44.1 kHz stereo PCM, and writes tagged chunks to the deck's
+   `BoundedDeckBuffer`. A cache miss returns no frames, requests the needed
+   range, and lets the existing buffer report a stall rather than fabricating
+   silence or advancing the source clock.
+3. Replace the `MixEngine` source node in `MixDeckOutput` with a source node
+   that calls `BoundedDeckMixer.render`. Preserve the existing audio-thread
+   rules: fixed scratch buffers, no allocation, no locks, no URLSession, and
+   no object lifecycle work in the callback.
+4. Port `MixDeckPlayer` incrementally behind a feature flag. The current track
+   begins once its initial buffer floor is met; the incoming edge is scheduled
+   only when its precomputed plan exists and its required range deadline is
+   feasible. The mixer keeps the outgoing deck unattenuated when the incoming
+   buffer is late, then reports the real delayed/fallback reason.
+5. Keep planning separate from decoding. Pack sidecars supply the analysis and
+   transition plans; they are hash-bound to the release asset. A mismatched
+   sidecar or changed bytes disables that smart edge before it reaches the
+   audio engine.
+6. Add deterministic HTTP-range fixture tests for initial-buffer startup,
+   slow ranges, 206/ETag validation, seek cancellation, stale-generation
+   rejection, interrupted route/backgrounding, incoming-edge deadline misses,
+   bounded resident memory, and no I/O/allocation on the render thread.
+
+The release publisher must also emit the frame/byte index. Fast-start M4A is
+acceptable only if the index can identify AAC sample boundaries without a
+whole-file download; otherwise publish an indexed AAC-LC transport form. The
+workflow must probe a newly uploaded release asset for `Accept-Ranges: bytes`
+and a successful `206` response before recording it in a shipped manifest.
+
 ## Delivery sequence
 
 ### 1. Asset and release gate
