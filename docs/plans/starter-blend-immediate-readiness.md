@@ -54,6 +54,20 @@ error, not a fallback to a different remote track.
    range support, hashes, decoder capabilities, duration/sample metadata, all
    track counts, and every edge before Listen calls a card ready.
 
+### Reuse for authored and saved blends
+
+The format is not starter-only. Every app-authored, curated blend is added to
+the same source catalog, published as a new immutable AAC release tag, and
+identified by `(releaseTag, assetSHA256, occurrenceID)` in its
+`BlendDocument`. Saving and replaying one of those blends therefore resolves
+the exact audio revision and its matching edge plans, not a mutable URL.
+
+User-created documents remain durable today through `BlendRepository`. A
+document that points at user-library or third-party-provider media retains its
+existing stable source identity and re-resolves that media under its provider's
+rules. The app must never upload a listener's private library audio to the
+Tonearm GitHub release; only app-owned/CC0 curated packs use this publisher.
+
 ## Playback changes
 
 1. Replace `StarterBlendPlayback.fetch` with a manifest resolver. Card states
