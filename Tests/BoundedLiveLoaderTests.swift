@@ -119,11 +119,31 @@ final class BoundedLiveLoaderTests: XCTestCase {
                                               approximateBPM: 120, sampleRate: 44_100) { _ in }
             XCTFail("expected denial")
         } catch {
-            XCTAssertEqual(error as? MixTrackLoaderError, .accessDenied)
+            XCTAssertEqual(error as? MixTrackLoaderError, .fileMissing)
         }
         XCTAssertEqual(SourceAccessLease.activeCount, baseline)
         let url = try tone("ok.wav", seconds: 3)
         let lease = try SourceAccessLease(url: url, securityScoped: true)
+        XCTAssertEqual(SourceAccessLease.activeCount, baseline + 1)
+        lease.release(); lease.release()
+        XCTAssertEqual(SourceAccessLease.activeCount, baseline)
+    }
+
+    func testMissingFileIsDistinctFromDenialAndNeverDecodes() async throws {
+        let missing = dir.appendingPathComponent("moved.wav")
+        do {
+            _ = try await MixTrackLoader.load(trackID: 1, source: .file(missing, container: .wav, securityScoped: false),
+                                              approximateBPM: 120, sampleRate: 44_100) { _ in }
+            XCTFail("expected failure")
+        } catch {
+            XCTAssertEqual(error as? MixTrackLoaderError, .fileMissing)
+        }
+    }
+
+    func testLeaseUsesInjectedAccessAndReleasesOnce() throws {
+        let url = try tone("inj.wav", seconds: 1)
+        let baseline = SourceAccessLease.activeCount
+        let lease = try SourceAccessLease(url: url, securityScoped: true, startAccess: { _ in false })
         XCTAssertEqual(SourceAccessLease.activeCount, baseline + 1)
         lease.release(); lease.release()
         XCTAssertEqual(SourceAccessLease.activeCount, baseline)
