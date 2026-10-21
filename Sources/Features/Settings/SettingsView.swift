@@ -127,7 +127,7 @@ struct SettingsView: View {
             case .tools: ToolsView()
             case .jamendoKey: JamendoCredentialView()
             case .cacheManagement: cacheManagementSheet
-            case .soundIndex: IndexStatusView(model: IndexStatusModel())
+            case .soundIndex: SoundIndexSheet()
             case .advanced: advancedForm
             }
         }
@@ -399,4 +399,14 @@ struct DiscoverySyncActivityRow: View {
         .padding(.top, 6)
         .accessibilityIdentifier("settings.icloudSync.discoveryActivity")
     }
+}
+
+
+/// Owns the Sound Index model for the lifetime of the sheet. Constructing
+/// `IndexStatusModel()` inline in the sheet builder would create a fresh
+/// model (and coordinator) on every re-evaluation, dropping the last good
+/// snapshot and orphaning the in-flight read.
+private struct SoundIndexSheet: View {
+    @StateObject private var model = IndexStatusModel()
+    var body: some View { IndexStatusView(model: model) }
 }
