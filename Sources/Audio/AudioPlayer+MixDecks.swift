@@ -442,9 +442,23 @@ extension AudioPlayer {
     public var transitionPresentation: TransitionPresentation {
         if isAmbient || queue.isEmpty { return .none }
         let hasNext = index + 1 < queue.count || repeatMode == .all
-        return TransitionPresentation.make(plan: transitionPlan, preparation: transitionPrepState,
+        // A plan for tracks that are no longer the playing/next pair (queue replaced) is stale.
+        var plan = transitionPlan
+        if !isOutgoingTransitionTailAudible, let p = plan, queue.indices.contains(index),
+           let current = queue[index].track.id, p.fromTrackID != current {
+            plan = nil
+        }
+        return TransitionPresentation.make(plan: plan, preparation: transitionPrepState,
                                            hasNext: hasNext || isOutgoingTransitionTailAudible,
                                            position: currentTime,
                                            outgoingTail: isOutgoingTransitionTailAudible)
+            .applying(displayedTransitionSnapshot)
+    }
+
+    /// The renderer's snapshot for the edge Now Playing shows: the audible one, else the next edge.
+    public var displayedTransitionSnapshot: TransitionExecutionSnapshot? {
+        if let active = transitionExecution.active,
+           active.phase == .overlapping || isOutgoingTransitionTailAudible { return active }
+        return transitionExecutionSnapshot(afterQueueIndex: index)
     }
 }
