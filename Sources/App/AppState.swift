@@ -39,6 +39,17 @@ final class AppState: ObservableObject {
     /// One preparation coordinator shared by Settings, Up Next and Mix
     /// Preview. Its published state is the status surface for every action.
     let transitionPrepService: TransitionPrepService
+    /// The one persistent store of saved blends (My Music > Saved Blends).
+    let blendRepository = BlendRepository(url: AppState.blendsFileURL)
+    /// Queue signature (track IDs in order) -> the blend id it was saved as, so
+    /// tapping Save Blend again for the same active queue is idempotent.
+    @Published var savedBlendIDsByQueue: [[Int64]: UUID] = [:]
+    private static var blendsFileURL: URL {
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("Blends", isDirectory: true).appendingPathComponent("blends.json")
+    }
 
     /// Restored from the last launch (real report: "when I enter Platterhead it doesn't return to
     /// where I was, it starts from scratch" — the tab always reset to `.listen`, nothing persisted
