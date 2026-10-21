@@ -27,6 +27,8 @@ enum MixTrackLoaderError: Error, LocalizedError, Equatable {
     case empty
     /// Scoped access to the file was refused: nothing is decoded.
     case accessDenied
+    /// The file was moved or deleted: nothing is decoded; reselect or relink it.
+    case fileMissing
     /// The decoder cannot position within this container, so a windowed decode is impossible.
     /// There is no whole-file fallback; the edge plays sequentially.
     case unsupportedBoundedDecode(AudioContainer)
@@ -38,7 +40,8 @@ enum MixTrackLoaderError: Error, LocalizedError, Equatable {
         case .download(let status): return "Download failed (HTTP \(status))"
         case .decode(let reason): return "Could not decode the track: \(reason)"
         case .empty: return "The track has no audio"
-        case .accessDenied: return "Access to the file was denied"
+        case .accessDenied: return "Access to the file was denied; the file was not opened. Retry or reselect it"
+        case .fileMissing: return "The file was moved or deleted; it was not opened. Reselect or relink it"
         case .unsupportedBoundedDecode: return "This format cannot be blended; it plays without a blend"
         case .tooLong: return "The track is too long to blend; it plays without a blend"
         }
