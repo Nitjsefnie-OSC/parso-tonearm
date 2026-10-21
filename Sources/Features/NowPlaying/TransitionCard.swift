@@ -31,7 +31,6 @@ struct TransitionDetailSheet: View {
 /// Compact tappable card under the progress bar; expands to a two-track card only while blending.
 struct TransitionCard: View {
     @EnvironmentObject private var player: AudioPlayer
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showDetail = false
 
@@ -57,9 +56,6 @@ struct TransitionCard: View {
                         if let detail = p.fallbackDetail {
                             Text(detail).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
                         }
-                        if !typeSize.isAccessibilitySize, !p.diagramSegments.isEmpty {
-                            TransitionDiagram(presentation: p, position: player.currentTime)
-                        }
                     }
                 }
                 .padding(10)
@@ -70,81 +66,119 @@ struct TransitionCard: View {
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(p.accessibilityLabel(outgoingTitle: row(p.outgoingTrackID)?.track.title,
-                                                     incomingTitle: row(p.incomingTrackID)?.track.title))
-            .accessibilityValue([TransitionDisclosure(p, position: player.currentTime)?.spokenSummary,
-                                 p.accessibilityValue].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+            .accessibilityLabel(accessibilityLabel(p))
+            .accessibilityValue(accessibilityValue(p))
             .accessibilityHint("Shows why this transition was chosen")
             .accessibilityIdentifier("np.transitionCard")
             .sheet(isPresented: $showDetail) { TransitionDetailSheet(presentation: p) }
         }
     }
 
+    private var overlap: OverlapCardModel? {
+        OverlapCardModel(presentation, snapshot: player.displayedTransitionSnapshot, position: player.currentTime)
+    }
+
+    private func accessibilityLabel(_ p: TransitionPresentation) -> String {
+        if let m = overlap {
+            return m.spokenSummary(outgoingTitle: row(p.outgoingTrackID)?.track.title,
+                                   incomingTitle: row(p.incomingTrackID)?.track.title)
+        }
+        return p.accessibilityLabel(outgoingTitle: row(p.outgoingTrackID)?.track.title,
+                                    incomingTitle: row(p.incomingTrackID)?.track.title)
+    }
+
+    private func accessibilityValue(_ p: TransitionPresentation) -> String {
+        // The overlap summary already carries style, phase and timing; keep the value quiet then.
+        overlap == nil ? p.accessibilityValue : ""
+    }
+
     @ViewBuilder
     private func blendingBody(_ p: TransitionPresentation) -> some View {
-        Text(p.cardTitle).font(Typography.caption).foregroundStyle(Palette.ink)
-        ForEach([("OUT", p.outgoingTrackID), ("IN", p.incomingTrackID)], id: \.0) { label, id in
+        if let m = overlap {
+            HStack {
+                Text(m.title).font(Typography.caption.weight(.semibold)).foregroundStyle(Palette.ink)
+                Spacer()
+                Text(m.styleLabel).font(Typography.caption).foregroundStyle(Palette.accent)
+            }
+            let layout = typeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+            layout {
+                deckColumn(label: "OUT", id: p.outgoingTrackID, caption: m.outgoingCaption, fade: 1 - (m.progress ?? 0.5))
+                deckColumn(label: "IN", id: p.incomingTrackID, caption: m.incomingCaption, fade: m.progress ?? 0.5)
+            }
+            PhaseRail(current: m.rail, progress: m.progress)
+        } else {
+            Text(p.cardTitle).font(Typography.caption).foregroundStyle(Palette.ink)
+        }
+    }
+
+    private func deckColumn(label: String, id: Int64?, caption: String, fade: Double) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 if let r = row(id) {
                     ArtworkView(trackRow: r, seed: r.album?.title ?? r.track.title, cornerRadius: 4)
-                        .frame(width: 28, height: 28)
-                        .accessibilityHidden(true)
+                        .frame(width: 32, height: 32)
                 } else {
-                    Image(systemName: "music.note").frame(width: 28, height: 28).accessibilityHidden(true)
+                    Image(systemName: "music.note").frame(width: 32, height: 32)
                 }
-                Text("\(label) · \(row(id)?.track.title ?? "")")
-                    .font(Typography.caption)
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(label).font(Typography.caption.weight(.bold)).foregroundStyle(Palette.inkSecondary)
+                    Text(row(id)?.track.title ?? "").font(Typography.caption).foregroundStyle(Palette.ink).lineLimit(1)
+                }
+            }
+            Silhouette(level: fade, filled: label == "IN")
+            if !caption.isEmpty {
+                Text(caption).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
             }
         }
-        if let d = TransitionDisclosure(p, position: player.currentTime) {
-            Text("\(d.section.label) · \(d.matchType)")
-                .font(Typography.caption)
-                .foregroundStyle(Palette.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let progress = d.overlapProgress {
-                ProgressView(value: progress)
-                    .tint(Palette.accent)
-                    .accessibilityHidden(true)
-            }
-        }
-        if !typeSize.isAccessibilitySize, !p.diagramSegments.isEmpty {
-            TransitionDiagram(presentation: p, position: player.currentTime)
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityHidden(true)
     }
 }
 
-/// Outgoing-decay / incoming-rise rows with a marked overlap and a playhead. Decorative curves are
-/// hidden from accessibility; shapes (dashed outgoing, solid incoming) carry meaning besides color.
-struct TransitionDiagram: View {
-    let presentation: TransitionPresentation
-    let position: Double
-
+/// Bar silhouette whose height follows the deck's fade level; decorative, so hidden from VoiceOver.
+struct Silhouette: View {
+    let level: Double
+    let filled: Bool
     var body: some View {
-        Canvas { context, size in
-            let third = size.width / 3
-            let rowH = size.height / 2 - 2
-            var out = Path()
-            out.move(to: CGPoint(x: 0, y: 2))
-            out.addLine(to: CGPoint(x: third, y: 2))
-            out.addLine(to: CGPoint(x: 2 * third, y: rowH - 2))
-            context.stroke(out, with: .color(Palette.inkSecondary),
-                           style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
-            var inc = Path()
-            inc.move(to: CGPoint(x: third, y: size.height - 2))
-            inc.addLine(to: CGPoint(x: 2 * third, y: rowH + 6))
-            inc.addLine(to: CGPoint(x: size.width, y: rowH + 6))
-            context.stroke(inc, with: .color(Palette.accent), style: StrokeStyle(lineWidth: 2))
-            context.fill(Path(CGRect(x: third, y: 0, width: third, height: size.height)),
-                         with: .color(Palette.accent.opacity(0.12)))
-            if let head = presentation.playhead(position: position) {
-                let x = size.width * head
-                context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)),
-                             with: .color(Palette.ink))
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(0..<16, id: \.self) { i in
+                let wave = 0.45 + 0.55 * abs(sin(Double(i) * 0.9))
+                Capsule()
+                    .fill(filled ? Palette.accent : Palette.inkSecondary)
+                    .frame(height: max(3, 24 * wave * min(max(level, 0.1), 1)))
             }
         }
-        .frame(height: 32)
+        .frame(height: 24)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Outgoing / overlap-now / incoming rail. The active stage is marked by weight and a filled
+/// marker, not by color alone.
+struct PhaseRail: View {
+    let current: OverlapCardModel.Rail
+    let progress: Double?
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 4) {
+                ForEach(OverlapCardModel.Rail.allCases, id: \.self) { stage in
+                    let on = stage == current
+                    Text(stage.label)
+                        .font(Typography.caption.weight(on ? .bold : .regular))
+                        .foregroundStyle(on ? Palette.ink : Palette.inkSecondary)
+                        .lineLimit(1).minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, minHeight: 24)
+                        .background(on ? Palette.accent.opacity(0.18) : Color.clear, in: Capsule())
+                        .overlay(Capsule().strokeBorder(on ? Palette.accent : Palette.hairline, lineWidth: on ? 2 : 1))
+                }
+            }
+            if let progress {
+                ProgressView(value: progress).tint(Palette.accent)
+            }
+        }
         .accessibilityHidden(true)
     }
 }

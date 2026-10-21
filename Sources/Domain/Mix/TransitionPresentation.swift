@@ -95,13 +95,16 @@ public struct TransitionPresentation: Sendable, Equatable {
     public var confidence: Double?
     public var reasons: [TransitionReason]
     public var preparation: GridPrepState?
+    /// Why the renderer executed differently from the plan (from the execution snapshot), if it did.
+    public var executionReason: TransitionExecutionReason?
 
     public init(phase: TransitionRuntimePhase, plannedStyle: TransitionDisplayStyle? = nil,
                 actualStyle: TransitionDisplayStyle? = nil, outgoingTrackID: Int64? = nil,
                 incomingTrackID: Int64? = nil, overlapRange: ClosedRange<Double>? = nil,
                 secondsUntilOverlap: Double? = nil, secondsRemaining: Double? = nil,
                 confidence: Double? = nil, reasons: [TransitionReason] = [],
-                preparation: GridPrepState? = nil) {
+                preparation: GridPrepState? = nil, executionReason: TransitionExecutionReason? = nil) {
+        self.executionReason = executionReason
         self.phase = phase
         self.plannedStyle = plannedStyle
         self.actualStyle = actualStyle
@@ -116,6 +119,46 @@ public struct TransitionPresentation: Sendable, Equatable {
     }
 
     public static let none = TransitionPresentation(phase: .noEdge)
+
+    /// Reconciles a plan-derived presentation with what the renderer actually reported. The plan
+    /// may promise an overlap; only the snapshot says whether one is audible. nil leaves it as is.
+    public func applying(_ snapshot: TransitionExecutionSnapshot?) -> TransitionPresentation {
+        guard let snapshot, showsConnector, phase != .notPlanned else { return self }
+        var r = self
+        r.executionReason = snapshot.reason
+        if let requested = snapshot.requestedStyle, r.plannedStyle == nil { r.plannedStyle = requested }
+        if let planned = snapshot.plannedStyle { r.plannedStyle = planned }
+        switch snapshot.phase {
+        case .denied, .cancelled:
+            r.phase = .fallback
+            r.actualStyle = nil
+            r.overlapRange = nil; r.secondsRemaining = nil; r.secondsUntilOverlap = nil
+            return r
+        case .upcoming, .overlapping, .handedOff, .completed: break
+        }
+        guard let executed = snapshot.executedStyle else { return r }
+        r.actualStyle = executed
+        if !executed.overlaps {
+            // Sequential handoff: never present two audible tracks.
+            r.overlapRange = nil; r.secondsRemaining = nil; r.secondsUntilOverlap = nil
+            if r.phase == .overlap || r.phase == .outgoingTail { r.phase = .fallback }
+            return r
+        }
+        switch snapshot.phase {
+        case .upcoming where r.phase == .overlap:
+            // Position reached the planned window but the renderer has not begun the overlap.
+            r.phase = .ready
+            r.secondsRemaining = nil
+            r.secondsUntilOverlap = 0
+        case .overlapping where r.phase == .ready || r.phase == .preparing:
+            r.phase = .overlap
+        case .completed where r.phase == .overlap || r.phase == .outgoingTail:
+            r.phase = .ready
+            r.secondsRemaining = nil
+        default: break
+        }
+        return r
+    }
 
     /// Maps today's plan, preparation state and playback position to a snapshot.
     /// - Parameters:
@@ -196,6 +239,18 @@ public struct TransitionPresentation: Sendable, Equatable {
     /// Why the edge fell back, if the plan says so. Never a path or a raw error.
     public var fallbackDetail: String? {
         guard phase == .fallback else { return nil }
+        switch executionReason {
+        case .admissionDenied?: return String(localized: "Blend denied: not safe to overlap these tracks", bundle: .module)
+        case .lateForPlannedBlend?: return String(localized: "Sequential handoff: the planned blend could not start in time", bundle: .module)
+        case .gaplessEdge?: return String(localized: "Sequential handoff: these tracks play gaplessly", bundle: .module)
+        case .plainFadeEdge?: return String(localized: "Plain fade", bundle: .module)
+        case .queueChanged?, .replaced?: return String(localized: "Blend cancelled: the queue changed", bundle: .module)
+        case .interrupted?, .stopped?, .restarted?: return String(localized: "Blend cancelled: playback was interrupted", bundle: .module)
+        case nil: break
+        }
+        if actualStyle?.overlaps == false {
+            return String(localized: "Sequential handoff, no blend", bundle: .module)
+        }
         return String(localized: "No smart blend plan for this transition", bundle: .module)
     }
 
