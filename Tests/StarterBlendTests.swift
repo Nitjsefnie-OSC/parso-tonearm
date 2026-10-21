@@ -76,4 +76,65 @@ final class StarterBlendTests: XCTestCase {
         _ = await (a, b)
         XCTAssertEqual(log.requests.count, 1)
     }
+
+    func testPreparedBlendStartsOnlyAfterEveryEdgeIsReady() async {
+        let blend = StarterBlendCatalog.blends[0]
+        let log = StartLog()
+        let playback = StarterBlendPlayback(
+            fetch: { ids in ids.map { jt($0) } },
+            prepare: { rows, progress in
+                XCTAssertTrue(log.requests.isEmpty, "must not play before preparation")
+                for row in rows { progress(row.track.id ?? 0, .ready) }
+            },
+            start: { log.requests.append($0) })
+        await playback.play(blend)
+        XCTAssertEqual(log.requests.count, 1)
+        XCTAssertTrue(log.requests[0].isPrepared)
+    }
+
+    func testOfflinePreparationIsVisibleAndOffersSequentialFallbackAndRetry() async {
+        let blend = StarterBlendCatalog.blends[0]
+        let log = StartLog()
+        let offline = OSAllocatedUnfairLock(initialState: true)
+        let playback = StarterBlendPlayback(
+            fetch: { ids in ids.map { jt($0) } },
+            prepare: { rows, progress in
+                for (i, row) in rows.enumerated() {
+                    if offline.withLock({ $0 }) && i == 1 { progress(row.track.id ?? 0, .waitingForNetwork); return }
+                    progress(row.track.id ?? 0, .ready)
+                }
+            },
+            start: { log.requests.append($0) })
+        await playback.play(blend)
+        guard case .unprepared(let reason) = playback.state(for: blend) else { return XCTFail("expected unprepared") }
+        XCTAssertTrue(reason.contains("offline"))
+        XCTAssertTrue(log.requests.isEmpty)
+
+        offline.withLock { $0 = false }
+        await playback.play(blend)
+        XCTAssertEqual(log.requests.count, 1)
+        XCTAssertTrue(log.requests[0].isPrepared)
+
+        offline.withLock { $0 = true }
+        await playback.play(blend)
+        playback.playSequentially(blend)
+        XCTAssertEqual(log.requests.count, 2)
+        XCTAssertFalse(log.requests[1].isPrepared)
+    }
+
+    func testInterruptedPreparationDoesNotStart() async {
+        let blend = StarterBlendCatalog.blends[0]
+        let log = StartLog()
+        let playback = StarterBlendPlayback(
+            fetch: { ids in ids.map { jt($0) } },
+            prepare: { rows, progress in
+                progress(rows[0].track.id ?? 0, .ready)
+                progress(rows[1].track.id ?? 0, .cancelled)
+            },
+            start: { log.requests.append($0) })
+        await playback.play(blend)
+        guard case .unprepared(let reason) = playback.state(for: blend) else { return XCTFail("expected unprepared") }
+        XCTAssertTrue(reason.contains("interrupted"))
+        XCTAssertTrue(log.requests.isEmpty)
+    }
 }
