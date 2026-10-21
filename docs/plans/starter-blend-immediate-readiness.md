@@ -1,78 +1,85 @@
-# Starter blends: immediate fresh-install readiness
+# Starter blends: immediate online readiness
 
 ## Decision
 
-A starter blend must work on the first launch without account setup, model
-downloads, library indexing, a Jamendo client ID, or a network connection.
-The app will therefore ship a versioned **Starter Blend Pack** containing the
-exact local audio assets used by every advertised starter blend. A remote
-Jamendo lookup may refresh catalogue information for ordinary discovery, but
-must never be a prerequisite for starting a starter blend.
+A starter blend must be selectable on the first launch without account setup,
+model downloads, library indexing, or a Jamendo client ID. The app bundles a
+small, versioned **Starter Blend Manifest Pack**: blend definitions, immutable
+AAC release URLs, byte ranges, hashes, technical metadata, attribution, and
+precomputed edge plans. Audio is hosted as immutable assets in a GitHub
+Release (during the first implementation) rather than committed to the app.
 
 This is intentionally not a cache-warming project. The current implementation
 has only remote track identities at install time. Remote, uncached assets are
 correctly denied Smart Blend admission because their duration, sample rate,
-channel count, and bytes have not been established. A fresh-install promise
-requires those bytes to be present in the app bundle.
+channel count, and bytes have not been established. The manifest supplies
+verified facts and the playback engine must progressively fetch exact byte
+ranges from its immutable release asset while playing.
 
 ## Definition of ready
 
 "Ready" means all of the following are true for a selected starter blend:
 
-- every advertised track resolves to the exact bundled bytes;
-- each asset has verified duration, sample rate, channel count, container, and
-  SHA-256 identity;
+- every advertised track resolves to a version-pinned release asset;
+- each asset has a verified duration, sample rate, channel count, container,
+  SHA-256 identity, and byte-range capability;
 - all adjacent edges have validated transition analysis and a concrete plan;
 - the queue is marked as a starter blend/mix before playback starts, so it is
   routed through MixDecks regardless of the global "use everywhere" preference;
 - no edge is presented as planned until it has passed admission and plan
   validation.
 
-It does **not** promise zero CPU work: MixDecks still decodes the current
-local file into its bounded PCM working set. The performance target is audible
-playback within one second on the supported-device baseline, with no network
-activity. Missing/corrupt bundled content is a release-blocking error, not a
-fallback to a different remote track.
+It does **not** promise zero CPU or network work. The performance target is
+audible playback after a small initial buffer (target: one second on the
+supported-network baseline), while later ranges continue to arrive. Missing,
+corrupt, non-range-capable, or hash-mismatched content is a release-blocking
+error, not a fallback to a different remote track.
 
 ## Pack format and ownership
 
 1. Replace the Jamendo-only catalog entries with a `StarterBlendManifest`.
-   It names a pack version, local resource path, source attribution/license,
-   content hash, technical metadata, stable occurrence ID, and each requested
-   edge style.
-2. Add the licensed, immutable audio files and manifest as application
-   resources. Keep the source-license evidence and attribution in-repository;
-   verify redistribution rights and App Store package-size impact before adding
-   any bytes. If the present Jamendo selections cannot be redistributed in the
-   app, commission or select replacement CC-compatible assets rather than
-   silently reverting to streamed playback.
+   It names a release/pack version, immutable HTTPS asset URL, source
+   attribution/license, content hash, technical metadata, stable occurrence
+   ID, and each requested edge style.
+2. Publish licensed AAC assets only as immutable GitHub Release assets. Keep
+   the source-license evidence and attribution in-repository; verify explicit
+   redistribution rights before publishing. If the present Jamendo selections
+   cannot be redistributed, commission or select replacement CC-compatible
+   assets rather than silently mirroring them.
 3. Generate an analysis sidecar from those exact files in a reproducible build
    tool. It contains the analysis/plan inputs and the manifest hash it was
    generated against. At runtime, reject a sidecar whose asset hash differs.
-4. Add `StarterBlendPackValidator`, run at app bootstrap and in release CI. It
-   verifies resource existence, hashes, decoder capabilities, duration/sample
-   metadata, all track counts, and every edge before Listen calls a card ready.
+4. Add `StarterBlendPackValidator`, run in release CI and at app bootstrap. It
+   verifies signed manifest structure, release URL/version pinning, declared
+   range support, hashes, decoder capabilities, duration/sample metadata, all
+   track counts, and every edge before Listen calls a card ready.
 
 ## Playback changes
 
-1. Replace `StarterBlendPlayback.fetch` with a pack resolver. Card states become
-   `validating`, `ready`, `starting`, and `unavailable(reason)`; the entire
-   catalog may be validated concurrently at launch, but no card waits on
-   network, model, or database work.
-2. Build `TrackRow` and `Asset` values from the local resources. They must use a
-   stable starter source identity and bundled/local `MixTrackSource`, never the
-   remote Jamendo URL path.
+1. Replace `StarterBlendPlayback.fetch` with a manifest resolver. Card states
+   become `validating`, `ready`, `starting`, and `unavailable(reason)`; the
+   bundled manifest validates at launch, but selection does not wait for model
+   or database work.
+2. Build `TrackRow` and `Asset` values from versioned release assets. They use a
+   stable starter source identity, immutable URLs, expected hashes, and a
+   byte-range-capable `MixTrackSource`, never the Jamendo API path.
 3. Introduce a `QueueSource.starterBlend` (or an equivalent explicit mix
    source) that carries the manifest plan and stable occurrence IDs. Update
    `AppState` to use it when it invokes `AudioPlayer.play`. This makes starter
    blends opt into MixDecks even when Smart Transitions is disabled globally.
-4. Teach `MixTrackLoader`/`BlendPlanCache` to consume the validated sidecar for
-   a bundled asset after checking its hash. It may recompute analysis as a
-   defensive fallback during development, but a release build treats a missing
-   or invalid sidecar as pack failure rather than showing a claimed-ready blend.
-5. Preflight all edges before enabling Play. For a ready blend, insert the
-   concrete plans into `BlendPlanCache` before `AudioPlayer.play`; warm the
-   first track's local decode on card selection. The transition card and queue
+4. Add a range-backed AAC source to MixDecks. It downloads only the first
+   decode buffer to start, retains a bounded ahead/behind window, honours
+   cancellation and cellular policy, and fails an edge early if its next
+   required ranges cannot meet the transition deadline. The current whole-file
+   `MixTrackLoader` cannot meet this requirement and must not be relabelled as
+   immediate streaming.
+5. Teach `MixTrackLoader`/`BlendPlanCache` to consume the validated sidecar
+   after hash verification. It may recompute analysis only in development; a
+   release build treats a missing or invalid sidecar as pack failure rather
+   than showing a claimed-ready blend.
+6. Install concrete plans into `BlendPlanCache` before `AudioPlayer.play`.
+   Buffer the opening track and the first transition window only; schedule later
+   windows ahead of their edge deadlines. The transition card and queue
    consequently have a real plan from their first render.
 6. If validation fails, the card is unavailable with an actionable explanation.
    Do not label an AVPlayer sequential queue as a starter *smart* blend. A
@@ -83,21 +90,22 @@ fallback to a different remote track.
 ### 1. Asset and release gate
 
 - Select/freeze the six blend asset sets and licenses.
-- Create the manifest generator, hash/metadata validator, and CI resource-size
-  budget.
-- Add a build/release check that fails if any packaged blend has an invalid
-  decoder, missing analysis, incomplete edge set, or unapproved license.
+- Create an AAC transcode/release publisher, manifest generator, and
+  hash/metadata validator.
+- Add a build/release check that fails if any release asset has an invalid
+  decoder, missing analysis, incomplete edge set, immutable-version mismatch,
+  or unapproved license.
 
 ### 2. Local resolver and routing
 
-- Implement the bundled resolver and its state model.
+- Implement the manifest resolver and its state model.
 - Add the explicit starter queue source and stable occurrence mapping.
 - Route ready starter requests through MixDecks and preserve existing normal
   playback for non-starter remote tracks.
 
 ### 3. Precomputation and user truth
 
-- Build/verify sidecars and prepopulate `BlendPlanCache` from the pack.
+- Build/verify sidecars and prepopulate `BlendPlanCache` from the manifest.
 - Surface validation/start progress only while the pack is genuinely not ready.
 - Make the Listen card, Now Playing transition card, and Up Next rows report
   the same actual readiness and failure reason.
@@ -106,18 +114,18 @@ fallback to a different remote track.
 
 - Unit-test manifest integrity, tamper/hash rejection, no-network resolution,
   plan-cache population, and mix routing.
-- Add a cold-install UI/production regression with networking disabled: select
-  every starter blend, begin playback, and assert all edges have concrete
-  plans—never `Smart blend unavailable` or `Not planned yet`.
-- On devices, test a freshly installed release build in airplane mode, first
-  launch after device restart, background/foreground, route changes, and low
-  storage/memory conditions. Record the device, build, and measured
-  time-to-audible result under the QA workflow.
+- Add a cold-install UI/production regression with a range-capable HTTP fixture:
+  select every starter blend, begin buffered playback, and assert all edges
+  have concrete plans—never `Smart blend unavailable` or `Not planned yet`.
+- On devices, test a freshly installed release build on Wi-Fi and cellular,
+  first launch after device restart, background/foreground, route changes,
+  interrupted downloads, and low storage/memory conditions. Record the device,
+  build, and measured time-to-audible result under the QA workflow.
 
 ## Non-goals
 
-- Downloading the whole pack after installation and calling it immediate.
-- Treating remote metadata or a cached URL as proof that source bytes are
-  blendable.
+- Downloading the whole pack before starting and calling it immediate.
+- Treating a remote URL or manifest metadata as proof that live source bytes
+  are blendable without range, hash, and deadline verification.
 - Advertising a fallback crossfade/sequential queue as the curated smart
   blend experience.
