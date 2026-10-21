@@ -27,7 +27,7 @@ jobs:
             echo "release tag already exists; release assets are immutable" >&2
             exit 1
           fi
-      - name: Build and verify CC0 AAC assets
+      - name: Build owner-approved AAC assets
         run: scripts/publish-starter-blend-aac.sh "$RELEASE_TAG"
       - name: Publish immutable release assets
         run: |
@@ -35,4 +35,4 @@ jobs:
             "dist/starter-blends-$RELEASE_TAG/starter-blends-manifest.json" \
             "dist/starter-blends-$RELEASE_TAG"/audio/*.m4a \
             --title "Starter Blend AAC Pack $RELEASE_TAG" \
-            --notes "Immutable CC0 AAC assets and verified manifest for Starter Blend playback."
+            --notes "Immutable owner-approved CC0 AAC assets and verified manifest for Starter Blend playback."

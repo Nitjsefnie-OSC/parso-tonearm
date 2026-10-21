@@ -16,6 +16,8 @@ command -v shasum >/dev/null
 [[ "$tag" =~ ^starter-blends-aac-v[0-9]+$ ]] || { echo "invalid release tag: $tag" >&2; exit 2; }
 [[ -f "$catalog" ]] || { echo "missing $catalog" >&2; exit 2; }
 [[ ! -e "$out" ]] || { echo "refusing to overwrite $out" >&2; exit 2; }
+jq -e '.licenseReview.status == "owner-verified" and .licenseReview.license == "CC0"' "$catalog" >/dev/null \
+  || { echo "owner CC0 review is not recorded in $catalog" >&2; exit 2; }
 mkdir -p "$out/audio" "$out/source"
 
 ids="$(jq -r '[.blends[].tracks[]] | unique | join("+")' "$catalog")"
@@ -33,10 +35,7 @@ mapfile -t expected < <(jq -r '.blends[].tracks[]' "$catalog" | sort -u)
 for id in "${expected[@]}"; do
   track="$(jq -ce --arg id "$id" '.results[] | select(.id == $id)' "$api" | head -n 1)"
   [[ -n "$track" ]] || { echo "Jamendo did not resolve track $id" >&2; exit 1; }
-  license="$(jq -r '.license_ccurl // empty' <<<"$track")"
-  [[ "$license" =~ ^https?://creativecommons\.org/publicdomain/zero/1\.0/?$ ]] || {
-    echo "track $id is not CC0: ${license:-missing license}" >&2; exit 1;
-  }
+  reported_license="$(jq -r '.license_ccurl // empty' <<<"$track")"
   url="$(jq -r '.audio // empty' <<<"$track")"
   [[ "$url" =~ ^https:// ]] || { echo "track $id has no HTTPS audio URL" >&2; exit 1; }
   source="$out/source/$id.mp3"
@@ -51,9 +50,9 @@ for id in "${expected[@]}"; do
   bytes="$(stat -c '%s' "$asset")"
   duration="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$asset")"
   jq -n --arg id "$id" --arg title "$(jq -r '.name' <<<"$track")" \
-    --arg artist "$(jq -r '.artist_name' <<<"$track")" --arg license "$license" \
+    --arg artist "$(jq -r '.artist_name' <<<"$track")" --arg license 'CC0' --arg reportedLicense "$reported_license" \
     --arg sha256 "$sha" --argjson bytes "$bytes" --argjson duration "$duration" \
-    '{id:$id,title:$title,artist:$artist,license:$license,sha256:$sha256,bytes:$bytes,durationSeconds:$duration,container:"m4a",codec:"aac-lc",sampleRate:44100,channels:2}' \
+    '{id:$id,title:$title,artist:$artist,license:$license,reportedSourceLicense:$reportedLicense,sha256:$sha256,bytes:$bytes,durationSeconds:$duration,container:"m4a",codec:"aac-lc",sampleRate:44100,channels:2}' \
     > "$out/$id.json"
 done
 

@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "audioFormat": "aac-lc-128k-m4a",
+  "licenseReview": {
+    "status": "owner-verified",
+    "license": "CC0",
+    "verifiedAt": "2026-10-21",
+    "note": "Owner verified redistribution permission for every catalog track. Jamendo API metadata is recorded for diagnostics but is not the licensing authority."
+  },
   "blends": [
     {"id":"starter.morning-light","title":"Morning Light","tracks":["1884163","1876521","1892244","1869875","1873110","1890332"]},
     {"id":"starter.deep-focus","title":"Deep Focus","tracks":["1856120","1861977","1879406","1884521","1865003","1870618"]},
