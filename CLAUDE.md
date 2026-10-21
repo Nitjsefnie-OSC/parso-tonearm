@@ -19,6 +19,29 @@ Read [`docs/plans/tonearm-mvp-ios/HANDOFF.md`](docs/plans/tonearm-mvp-ios/HANDOF
 - **TestFlight labels are a state machine, not human QA:** `testflight-uploaded` means Apple accepted the binary; `testflight-processing` means Apple has not finished; `ready-for-qa` means App Store Connect reports the exact build `VALID`; `testflight-distribution-confirmed` is extra group evidence; and `testflight-access-unverified` means only that the group lookup was unavailable or empty. Never add `ready-for-qa` merely because an upload command succeeded.
 - **Human QA belongs on the issue:** after installing the exact version/build, record device, OS, issue-specific scenario, and pass/fail in the issue checklist. A failure starts a repair cycle and must not be hidden by TestFlight labels.
 
+## Mandatory production-regression workflow (red → green)
+
+`make tonearm-production-regression` (`scripts/run-production-regression.sh`) runs the hermetic
+`TonearmProductionRegressionTests` target: production queue actions, player-adapter call
+verification, deterministic render/baseline comparison, accessibility strings and resource-lease
+checks. No Docker, network, model download, signing secret or device. `scripts/ci-validate.sh` (used by
+PR validation and the issue worker) runs it, so a failing assertion fails the PR; a generic
+`swift test` pass is not evidence for issue work. It is separate from the Docker UI regression suite.
+
+For every issue:
+1. Reproduce the failing behavior: add/strengthen a harness test (or baseline) and run the command; it must fail with the screen/state/assertion named.
+2. Implement the fix.
+3. Rerun `make tonearm-production-regression` until green. Failures leave the actual render and diff in `.build/production-regression-artifacts` (override with `TONEARM_HARNESS_ARTIFACT_DIR`).
+4. Audit production call sites (the shipping code must call the new path, not only a helper) and re-read the issue checklist.
+5. Record requirement → production call site → test evidence in the PR.
+
+Baselines live in `Tests/ProductionRegression/Baselines`; re-record only deliberately with
+`TONEARM_HARNESS_RECORD=1` and review the diff. Launch keys (`TONEARM_HARNESS_ROUTE`,
+`..._ACCESSIBILITYCATEGORY`, `..._COLORSCHEME`, `..._REDUCEMOTION`, `..._BASELINEDIR`, or
+`-TonearmHarness<Key>` arguments) inject the configuration.
+
+TestFlight upload is delivery only. It is not validation, and physical-device QA must never be fabricated or inferred from the harness or an upload.
+
 ## Git hook timeouts
 
 - The pre-commit hook runs `swift test` only now; a normal command timeout is enough.

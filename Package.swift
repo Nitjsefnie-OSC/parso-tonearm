@@ -231,9 +231,18 @@ let package = Package(
                 // Helper process used by optional integration smoke tests.
                 "Support",
                 // Discovery tests live in their own target (TonearmDiscoveryTests).
-                "DiscoveryTests"
+                "DiscoveryTests",
+                // Hermetic production-flow harness lives in its own target (issue #80).
+                "ProductionRegression"
             ],
             resources: [.copy("Fixtures")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TonearmProductionRegressionTests",
+            dependencies: ["TonearmCore"],
+            path: "Tests/ProductionRegression",
+            exclude: ["Baselines"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

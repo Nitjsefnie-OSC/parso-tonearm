@@ -1,0 +1,6 @@
+screen: queue
+scheme: light category: large reduceMotion: false
+control: Reorder Up Next (min 44pt)
+row 1: label="1, Bravo, Fixture Band" value="Now playing, 1 minute, 1 second" hint="Currently playing"
+row 2: label="2, Charlie" value="Up next, 4 minutes" hint="Plays this track now"
+row 3: label="3, Delta, Other Act" value="3 seconds" hint="Plays this track now"

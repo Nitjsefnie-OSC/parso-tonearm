@@ -1,4 +1,9 @@
-.PHONY: ci-guards models starter project test-local test-swift test-ui test-integration test-ui-regression
+.PHONY: tonearm-production-regression ci-guards models starter project test-local test-swift test-ui test-integration test-ui-regression
+
+# Hermetic production-flow + visual regression harness (issue #80). Mandatory evidence for issue
+# work; a generic `swift test` pass does not substitute for it. See CLAUDE.md.
+tonearm-production-regression:
+	scripts/run-production-regression.sh
 
 # The structural guards CI runs before it spends a test job on you: the Swift 6
 # contract, the StoreKit import boundary, and the codename leak. Under a second.
