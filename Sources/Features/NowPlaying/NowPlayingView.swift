@@ -195,14 +195,14 @@ struct NowPlayingView: View {
 #endif
     }
 
-    /// The iPhone screen is sized to the display; the Mac inspector column can
-    /// be shorter than the artwork, transport and queue together, so it scrolls.
+    /// One scroll surface on every platform: the queue renders inline (iPhone) so
+    /// the header and transport stay reachable however long the queue is.
     @ViewBuilder
     private func nowPlayingScroll<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         #if os(macOS)
         ScrollView { content().padding(.vertical, 12) }
         #else
-        content()
+        ScrollView { content() }
         #endif
     }
 
