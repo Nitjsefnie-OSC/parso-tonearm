@@ -39,6 +39,24 @@ final class NowPlayingRegressionUITests: XCTestCase {
         }
     }
 
+    /// Advancing playback must not move the viewport or strand the transport:
+    /// the queue lives in the single Now Playing scroll surface, and the user can
+    /// always scroll back to the controls. (Needs a queue of several tracks.)
+    func testAdvancingPlaybackKeepsTransportReachable() throws {
+        app = .launchForRegression()
+        openNowPlaying()
+        let next = app.waitFor("np.next")
+        for _ in 0..<3 { next.tap() }
+        XCTAssertTrue(next.isHittable, "np.next must stay hittable after advancing")
+        let list = app.element("np.queue.list")
+        if list.exists {
+            app.swipeUp()
+            app.swipeDown()
+            app.swipeDown()
+        }
+        XCTAssertTrue(app.waitFor("np.playpause").isHittable, "controls reachable after scrolling back up")
+    }
+
     /// D-2 · Artwork is never covered by a "Tap to Change" affordance, and
     /// changing artwork lives in the overflow menu instead.
     func testArtworkHasNoOverlayAndArtworkActionsLiveInOverflow() throws {

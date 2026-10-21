@@ -150,6 +150,16 @@ struct UpNextView: View {
                     .padding(.vertical, 8)
             } else {
                 let edges = Dictionary(uniqueKeysWithValues: edgeRows.map { ($0.key.position, $0) })
+                #if os(iOS)
+                // Not a List: the parent Now Playing ScrollView is the only scroller, so
+                // playback advancing can never move a nested viewport or strand the controls.
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(queueEntries, id: \.id) { entry in
+                        iosQueueRow(offset: entry.offset, row: entry.row, edges: edges)
+                    }
+                }
+                .accessibilityIdentifier("np.queue.list")
+                #else
                 List {
                     ForEach(Array(player.queue.enumerated()), id: \.offset) { offset, row in
                         VStack(alignment: .leading, spacing: 4) {
@@ -196,6 +206,7 @@ struct UpNextView: View {
                 .environment(\.editMode, $editMode)
                 #endif
                 .frame(height: queueListHeight)
+                #endif
             }
         }
         .padding(.horizontal, 12)
@@ -224,6 +235,82 @@ struct UpNextView: View {
         let next = position + 1 < player.queue.count ? position + 1 : 0
         return player.queue[next]
     }
+
+    #if os(iOS)
+    /// Rows keyed by queue-occurrence identity so duplicates stay distinct and
+    /// identity survives advance, insert, remove and reorder.
+    private var queueEntries: [(id: String, offset: Int, row: TrackRow)] {
+        let occurrences = player.queueOccurrences
+        let usable = occurrences.count == player.queue.count
+        return player.queue.enumerated().map { offset, row in
+            (usable ? "o-\(occurrences[offset].rawValue)" : "i-\(offset)", offset, row)
+        }
+    }
+
+    @ViewBuilder
+    private func iosQueueRow(offset: Int, row: TrackRow, edges: [Int: QueueEdgeRow]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if offset == firstAutoAddedOffset {
+                keepPlayingSeparator
+            }
+            HStack(spacing: 6) {
+                if editMode == .active {
+                    Button { player.removeFromQueue(at: offset) } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(Color.red)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(QueueAccessibility.removeActionName)
+                    .accessibilityIdentifier("np.queue.remove.\(offset)")
+                }
+                QueueRow(row: row,
+                         position: offset + 1,
+                         isCurrent: offset == player.index,
+                         isUpNext: offset == player.index + 1,
+                         queueIndex: offset)
+                if editMode == .active {
+                    VStack(spacing: 0) {
+                        Button { player.moveQueueItem(from: offset, to: offset - 1) } label: {
+                            Image(systemName: "chevron.up").frame(width: 44, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .disabled(offset == 0)
+                        .accessibilityLabel("Move up")
+                        .accessibilityIdentifier("np.queue.moveUp.\(offset)")
+                        Button { player.moveQueueItem(from: offset, to: offset + 1) } label: {
+                            Image(systemName: "chevron.down").frame(width: 44, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .disabled(offset == player.queue.count - 1)
+                        .accessibilityLabel("Move down")
+                        .accessibilityIdentifier("np.queue.moveDown.\(offset)")
+                    }
+                    .buttonStyle(.plain)
+                    .font(Typography.caption)
+                    .foregroundStyle(Palette.inkSecondary)
+                }
+            }
+            if let edge = edges[offset] {
+                QueueTransitionConnector(edge: edge, isSelected: edge.key == selectedEdge,
+                         incomingPosition: edge.key.position + 1 < player.queue.count ? edge.key.position + 2 : 1) {
+                    selectedEdge = edge.key
+                }
+                .id(edge.key)
+            }
+        }
+        .padding(.vertical, 4)
+        .contextMenu {
+            Button(role: .destructive) { player.removeFromQueue(at: offset) } label: {
+                Label("Remove", systemImage: "trash")
+            }
+        }
+        .accessibilityAction(named: QueueAccessibility.removeActionName) {
+            player.removeFromQueue(at: offset)
+        }
+    }
+    #endif
 
     private var queueListHeight: CGFloat {
         let visibleRows = min(max(player.queue.count, 1), 6)
