@@ -12,6 +12,7 @@ struct SavedBlendsView: View {
 
     var body: some View {
         List {
+            BlendLabEntryButton()
             ForEach(issues.indices, id: \.self) { i in
                 Label(Self.describe(issues[i]), systemImage: "exclamationmark.triangle")
                     .font(Typography.caption)

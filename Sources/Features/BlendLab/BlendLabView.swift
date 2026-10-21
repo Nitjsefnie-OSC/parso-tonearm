@@ -1,0 +1,243 @@
+import SwiftUI
+import TonearmCore
+import TonearmDiscovery
+
+/// Entry row shared by Listen and My Music.
+struct BlendLabEntryButton: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Button { appState.showBlendLab = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "wand.and.stars").foregroundStyle(Palette.accent)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Blend Lab").font(Typography.headline)
+                    Text("Create, preview, edit and save a blend.")
+                        .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").foregroundStyle(Palette.inkTertiary)
+                    .accessibilityHidden(true)
+            }
+            .padding(12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens Blend Lab")
+        .accessibilityIdentifier("blendlab.entry")
+    }
+}
+
+/// The production generator: the real mix planner over the library's analysed
+/// metadata. It throws when the planner has nothing to chain (for example no
+/// BPM/key analysis yet), which makes the session fall back to a basic mix.
+enum BlendLabGenerator {
+    static func generate(store: LibraryStore, library: [TrackRow],
+                         request: BlendLabRequest) async throws -> BlendLabGeneration {
+        let ids = library.compactMap(\.track.id)
+        let info = (try? await store.djLoadTrackInfo(trackIds: ids)) ?? [:]
+        let energies = (try? await store.discoveryEnergies(trackIds: ids)) ?? [:]
+        let candidates = library.compactMap { row -> MixCandidate? in
+            guard let id = row.track.id else { return nil }
+            let m = info[id]
+            return MixCandidate(trackID: id, bpm: m?.bpm, camelot: m?.camelotKey, energy: energies[id],
+                                artist: row.artist?.name, albumID: row.album?.id,
+                                duration: row.track.durationSec ?? 0)
+        }
+        let mix = MixRequest(candidates: candidates, shape: request.shape,
+                             targetDuration: TimeInterval(request.targetTrackCount) * 240,
+                             lockedFirst: request.seedTrackIDs.first,
+                             seed: UInt64(Date().timeIntervalSince1970 * 1_000),
+                             compatibility: .standard)
+        let plan = await Task.detached(priority: .userInitiated) { MixPlanner.plan(mix) }.value
+        let byID = Dictionary(library.compactMap { r in r.track.id.map { ($0, r) } },
+                              uniquingKeysWith: { first, _ in first })
+        let rows = plan.steps.compactMap { byID[$0.trackID] }
+        guard rows.count > 1 else { throw CocoaError(.featureUnsupported) }
+        return BlendLabGeneration(rows: rows, plan: plan, isBasicMix: false)
+    }
+}
+
+struct BlendLabView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var session: BlendLabSession
+    @State private var seedID: Int64?
+    @State private var count = 12
+    @State private var shape: MixShape = .steady
+    @State private var replacing: ReplaceTarget?
+    @State private var title = ""
+
+    init(appState: AppState) {
+        let store = appState.store
+        _session = StateObject(wrappedValue: BlendLabSession(
+            generate: { request in
+                let library = await MainActor.run { appState.allTracks }
+                return try await BlendLabGenerator.generate(store: store, library: library, request: request)
+            },
+            library: { appState.allTracks },
+            repository: appState.blendRepository,
+            play: { rows in AudioPlayer.shared.play(tracks: rows, startAt: 0, source: .none) }))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                createSection
+                statusSection
+                if session.document != nil { resultSections }
+            }
+            .navigationTitle("Blend Lab")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { session.cancel(); dismiss() }
+                        .accessibilityIdentifier("blendlab.close")
+                }
+            }
+            .sheet(item: $replacing) { target in
+                ReplacePicker(candidates: session.replacementCandidates()) { row in
+                    session.replace(occurrenceID: target.id, with: row)
+                }
+            }
+        }
+        .onDisappear { session.cancel() }
+    }
+
+    private var createSection: some View {
+        Section("Create") {
+            Picker("Start from", selection: $seedID) {
+                Text("Surprise me").tag(Int64?.none)
+                ForEach(appState.allTracks.prefix(200), id: \.id) { row in
+                    Text(row.track.title).tag(row.track.id)
+                }
+            }
+            .accessibilityIdentifier("blendlab.seed")
+            Picker("Mood", selection: $shape) {
+                Text("Steady").tag(MixShape.steady)
+                Text("Rising energy").tag(MixShape.risingBPM)
+                Text("Warm up, peak, cool down").tag(MixShape.warmUpPeakCoolDown)
+                Text("Wind down").tag(MixShape.windDown)
+            }
+            .accessibilityIdentifier("blendlab.shape")
+            Stepper("Tracks: \(count)", value: $count, in: 2...40)
+                .accessibilityIdentifier("blendlab.count")
+            if session.phase == .generating {
+                Button("Cancel", role: .cancel) { session.cancel() }
+                    .accessibilityIdentifier("blendlab.cancel")
+            } else {
+                Button(session.document == nil ? "Generate" : "Regenerate") { generate() }
+                    .accessibilityIdentifier("blendlab.generate")
+                    .disabled(appState.allTracks.isEmpty)
+            }
+            if appState.allTracks.isEmpty {
+                Text("Add music to your library to create a blend.")
+                    .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var statusSection: some View {
+        switch session.phase {
+        case .generating:
+            Section { ProgressView("Building your blend…").accessibilityIdentifier("blendlab.progress") }
+        case .failed(let text):
+            Section {
+                Label(text, systemImage: "exclamationmark.triangle").foregroundStyle(Palette.danger)
+                    .accessibilityIdentifier("blendlab.error")
+                Button("Try again") { generate() }
+            }
+        default:
+            if let message = session.message {
+                Section { Text(message).font(Typography.caption)
+                    .foregroundStyle(Palette.inkSecondary).accessibilityIdentifier("blendlab.message") }
+            }
+        }
+    }
+
+    private var resultSections: some View {
+        Group {
+            Section("Preview") {
+                let items = session.orderedRows
+                ForEach(Array(items.enumerated()), id: \.element.occurrenceID) { index, item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.row.track.title)
+                        Text(item.row.artist?.name ?? "").font(Typography.caption)
+                            .foregroundStyle(Palette.inkSecondary)
+                        if index < items.count - 1 { edgeLabel(after: item.occurrenceID) }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAction(named: Text("Play from here")) { session.playPreview(from: index) }
+                    .accessibilityAction(named: Text("Replace")) { replacing = ReplaceTarget(id: item.occurrenceID) }
+                    .accessibilityAction(named: Text("Remove")) { session.remove(occurrenceID: item.occurrenceID) }
+                    .swipeActions {
+                        Button("Remove", role: .destructive) { session.remove(occurrenceID: item.occurrenceID) }
+                        Button("Replace") { replacing = ReplaceTarget(id: item.occurrenceID) }.tint(Palette.accent)
+                    }
+                    .contextMenu {
+                        Button("Play from here") { session.playPreview(from: index) }
+                        Button("Replace…") { replacing = ReplaceTarget(id: item.occurrenceID) }
+                        if index < items.count - 1 {
+                            let off = isNoBlend(after: item.occurrenceID)
+                            Button(off ? "Restore automatic blend" : "No blend after this track") {
+                                session.setNoBlend(afterOccurrence: item.occurrenceID, !off)
+                            }
+                        }
+                    }
+                }
+                .onMove { session.move(from: $0, to: $1) }
+                .onDelete { offsets in
+                    let ids = offsets.map { items[$0].occurrenceID }
+                    ids.forEach { session.remove(occurrenceID: $0) }
+                }
+            }
+            Section {
+                Button("Play") { session.playPreview() }.accessibilityIdentifier("blendlab.play")
+                TextField("Name", text: $title).accessibilityIdentifier("blendlab.name")
+                Button(session.savedID == nil ? "Save Blend" : "Saved") {
+                    Task { await session.save(title: title) }
+                }
+                .disabled(session.savedID != nil)
+                .accessibilityIdentifier("blendlab.save")
+            }
+        }
+    }
+
+    private func isNoBlend(after id: UUID) -> Bool {
+        session.document?.requestedIntent(afterOccurrence: id) == BlendLabSession.noBlendStyle
+    }
+
+    private func edgeLabel(after id: UUID) -> some View {
+        let style = session.document?.requestedIntent(afterOccurrence: id)
+        let text: LocalizedStringKey = style == BlendLabSession.noBlendStyle
+            ? "→ No blend" : (style == nil ? "→ Automatic blend" : "→ Requested blend")
+        return Text(text).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+    }
+
+    private func generate() {
+        session.start(BlendLabRequest(seedTrackIDs: seedID.map { [$0] } ?? [],
+                                      targetTrackCount: count, shape: shape))
+    }
+}
+
+private struct ReplaceTarget: Identifiable { let id: UUID }
+
+private struct ReplacePicker: View {
+    let candidates: [TrackRow]
+    let pick: (TrackRow) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(candidates.prefix(300), id: \.id) { row in
+                Button(row.track.title) { pick(row); dismiss() }
+            }
+            .navigationTitle("Replace Track")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+    }
+}

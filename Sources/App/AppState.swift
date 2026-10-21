@@ -137,6 +137,7 @@ final class AppState: ObservableObject {
     // Watch
     @Published var watchSessionState: WatchSessionDisplayState = .unsupported
     @Published var showWatchSettings = false
+    @Published var showBlendLab = false
     @Published var watchTransferActiveCount: Int = 0
     /// Watch track IDs (`PhoneWatchID` stable strings) the watch has reported as installed.
     @Published var watchInstalledTrackIDs: Set<String> = []
