@@ -142,6 +142,35 @@ whole-file download; otherwise publish an indexed AAC-LC transport form. The
 workflow must probe a newly uploaded release asset for `Accept-Ranges: bytes`
 and a successful `206` response before recording it in a shipped manifest.
 
+### Implementation diff map
+
+| File | Change |
+| --- | --- |
+| `Sources/Audio/MixDecks/MixDeckOutput.swift` | Add a bounded-output mode whose `AVAudioSourceNode` calls `BoundedDeckMixer.render` rather than `MixRenderHandle.render`. Keep the same max-block splitting, route-change restart, offline rendering, output volume, and source-node lifetime rules. Do not call the mixer directly from the main actor; use an audio-thread mailbox for begin/seek/schedule/pause commands. |
+| `Sources/Audio/MixDecks/MixDeckPlayer.swift` | Introduce a deck source abstraction alongside the existing `MixTrackAudio`. Select bounded streaming for release-pack AAC assets, retain the existing whole-PCM engine for local/offline sources during the rollout, and gate the new path behind a feature flag. Replace direct `mix.prepare`/`mix.schedule` calls with output operations that can target either backend. Preserve `TransitionSafetyMonitor`, queue generations, delayed-edge reporting, and the no-blend escape hatch. |
+| `Sources/Audio/MixDecks/MixTrackLoader.swift` | Split current `load` into `loadResident` (unchanged compatibility path) and `openStreaming`. The latter validates manifest hash/index metadata and returns a descriptor, never a whole `PCMBuffer`. Remove the assumption that a remote source must be entirely downloaded before planning. |
+| `Sources/Audio/MixDecks/HTTPRangeAACSource.swift` (new) | Actor owning release URL, ETag/content-length validation, sparse cache, byte-range coalescing, request priorities, cancellation, and cache eviction. Expose only verified local byte windows to decoders. Reject 200 responses to range requests, wrong ETags, changed lengths, redirects to an unexpected host, and hashes that differ once a complete asset is cached. |
+| `Sources/Audio/MixDecks/AACFrameIndex.swift` (new) | Decode the publisher-generated, hash-bound AAC sample/frame index. Map source frame windows to inclusive HTTP byte ranges. Validate monotonic offsets, duration, sample rate, channels, and index hash before playback. |
+| `Sources/Audio/MixDecks/StreamingDeckFeeder.swift` (new) | Run off the realtime thread. It asks a `BoundedDeckBuffer` for its next request, requests the matching bytes, decodes cached AAC frames to 44.1 kHz stereo PCM, and writes the matching generation. On a miss it schedules fetch work and writes nothing; no stale or discontinuous chunk reaches the buffer. |
+| `Sources/Audio/MixDecks/BoundedDeckMixer.swift` | Preserve its fixed memory, shared clock, incoming-buffer floor, and no-I/O/no-allocation render contract, but do **not** assume its current equal-power fade is feature-parity with `MixEngine`. Add a bounded transition renderer (or extract a reusable `ParsoMixEngine` kernel) that reproduces the approved plan’s phrase timing, crossover curve, bass swap, tempo/key-lock behavior, and delayed-edge semantics. The streaming flag cannot ship until golden-render tests prove parity for every supported transition style. |
+| `Sources/Audio/AudioPlayer+MixDecks.swift` | Teach `mixTrackSource(for:)` and `smartBlendCapabilities(at:)` about verified release-pack descriptors, replacing the unconditional remote-uncached denial only for that asset type. Publish real buffering/delay/failure states instead of `Smart blend unavailable`. |
+| `Sources/Remote/StarterBlendPlayback.swift` | Resolve a bundled manifest into pack-backed rows and an explicit starter queue source. Buffer the current deck to its start threshold, schedule fetches for the next edge, and never use the Jamendo browse API at playback time. |
+| `Sources/App/AppState.swift` and `Sources/Audio/AudioPlayer+QueueSource.swift` | Add `QueueSource.starterBlend` carrying the immutable pack/release identity, occurrence IDs, and plans. This keeps starter blends on MixDecks even when the global Smart Transition preference is off. |
+| `Sources/Domain/Mix/StarterBlendCatalog.swift` | Replace raw Jamendo IDs with the bundled pack-manifest identity. Keep stable blend and occurrence UUIDs so saves/replays stay valid across releases. |
+| `Config/starter-blend-source.json` and `scripts/publish-starter-blend-aac.sh` | Promote the generated analysis/frame index to a first-class release artifact; fail publishing unless every asset has a source review record, AAC output, stable hash, and post-upload range probe. New curated blends append here and publish under a new immutable tag. |
+| `Tests/BoundedDeckMixerTests.swift` | Preserve existing real-time/memory tests and add integration fixtures through the actual output adapter. |
+| `Tests/HTTPRangeAACSourceTests.swift`, `Tests/StreamingDeckFeederTests.swift`, `Tests/StarterBlendStreamingTests.swift` (new) | Cover HTTP 206/ETag/hash handling, frame-to-range mapping, initial-buffer start, short reads, retries, seek/reuse cancellation, late incoming audio, device-route pause/resume, and pack-backed queue routing. |
+| `Tests/ProductionRegression/ProductionRegressionTests.swift` | Add cold-install online regression: a fixture server serves only required ranges; every starter edge starts with a concrete plan, and neither fallback token is rendered. |
+
+### Sequenced pull requests
+
+1. Land the manifest/index model and release publisher validation without changing playback.
+2. Land `HTTPRangeAACSource` plus fixture-server tests; it is not reachable from the player yet.
+3. Land `StreamingDeckFeeder` and wire it to `BoundedDeckMixer` in offline/integration tests.
+4. Add the bounded transition renderer (or extracted `ParsoMixEngine` kernel) and golden-output parity fixtures for crossfade, phrase, bass-swap, tempo, key-lock, and delayed-edge plans.
+5. Add the bounded-output adapter and feature flag; retain the resident engine as a rollback path.
+6. Route release-pack starter blends through the bounded path, add production regressions, then enable it only after device QA confirms buffer, seek, background, route-change, and delayed-edge behavior.
+
 ## Delivery sequence
 
 ### 1. Asset and release gate
