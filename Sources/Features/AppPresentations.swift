@@ -3,7 +3,7 @@ import TonearmCore
 import UniformTypeIdentifiers
 
 /// Every app-wide sheet, importer and picker that `AppState` can request —
-/// onboarding, Add Music, Build a Mix, new playlist, sources/servers, the
+/// Add Music, Build a Mix, new playlist, sources/servers, the
 /// file importer, custom-artwork picker and metadata editor. Shared by the
 /// iPhone `RootView` and the Mac `MacRootView` so a flow added for one
 /// platform can never silently be missing from the other.
@@ -13,9 +13,6 @@ struct AppPresentations: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .modifier(OnboardingPresentation(isPresented: Binding(
-                get: { !appState.didOnboard },
-                set: { if $0 == false { appState.didOnboard = true } })))
             .sheet(isPresented: $appState.showAddMenu) {
                 AddMenuSheet()
                     #if os(iOS)
@@ -59,7 +56,7 @@ struct AppPresentations: ViewModifier {
                     .macSheetFrame(minWidth: 460, minHeight: 420)
             }
             .alert("Smart Transitions were paused after playback was interrupted.",
-                   isPresented: Binding(get: { player.transitionRecoveryNoticePending && appState.didOnboard },
+                   isPresented: Binding(get: { player.transitionRecoveryNoticePending },
                                         set: { _ in })) {
                 Button("Keep paused") { player.resolveTransitionRecovery(reenable: false) }
                 Button("Re-enable") { player.resolveTransitionRecovery(reenable: true) }
@@ -221,22 +218,6 @@ struct AppStatusBanners: View {
 
             Spacer()
         }
-    }
-}
-
-/// iPhone onboarding is a full-screen cover; a Mac has no full-screen cover,
-/// so it is a sized sheet over the main window.
-private struct OnboardingPresentation: ViewModifier {
-    @Binding var isPresented: Bool
-
-    func body(content: Content) -> some View {
-        #if os(iOS)
-        content.fullScreenCover(isPresented: $isPresented) { OnboardingView() }
-        #else
-        content.sheet(isPresented: $isPresented) {
-            OnboardingView().frame(minWidth: 640, minHeight: 560)
-        }
-        #endif
     }
 }
 

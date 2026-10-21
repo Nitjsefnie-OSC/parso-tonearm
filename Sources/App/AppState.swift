@@ -152,6 +152,17 @@ final class AppState: ObservableObject {
     @AppStorage("prefetchDepth") var prefetchDepth = 2
     @AppStorage("artworkLookup") var artworkLookup = true
     @AppStorage("didOnboard") var didOnboard = false
+    /// Listen's starter-blend Play. Owned here, not by the view, so a recreated
+    /// `ListenView` shares the same in-flight guard and never starts twice.
+    let starterBlends = StarterBlendPlayback(
+        fetch: { ids in
+            try await JamendoAPI(clientID: JamendoAppConfig.clientID,
+                                 baseURL: JamendoAppConfig.baseURL).tracks(ids: ids)
+        },
+        start: { request in
+            AudioPlayer.shared.play(tracks: request.rows, startAt: 0)
+        })
+
     /// "Keep Playing" (main-library queue continuation, C01–C09 CLAP reuse):
     /// on by default. Settings-level detail lives alongside `keepPlayingBatchSize`;
     /// the primary discoverable toggle is in Now Playing (CLAUDE.md "no silent/

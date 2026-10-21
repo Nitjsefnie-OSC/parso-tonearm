@@ -437,6 +437,35 @@ public struct JamendoAPI: Sendable {
         return try await fetchTracksPage(tag: trimmed, offset: offset, limit: limit)
     }
 
+    /// Looks up specific tracks by Jamendo id (the curated starter blends).
+    /// Order is the API's, so callers reorder by the ids they asked for.
+    public func tracks(ids: [String]) async throws -> [JamendoTrack] {
+        guard !clientID.isEmpty else { throw JamendoGenreError.notConfigured }
+        guard !ids.isEmpty else { return [] }
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("tracks"),
+            resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "id", value: ids.joined(separator: "+")),
+            URLQueryItem(name: "limit", value: String(ids.count)),
+            URLQueryItem(name: "include", value: "musicinfo"),
+            URLQueryItem(name: "audioformat", value: "mp32"),
+            URLQueryItem(name: "audiodlformat", value: "mp32"),
+        ]
+        guard let url = components?.url else { throw JamendoGenreError.transport }
+        let (data, response) = try await session.data(for: URLRequest(url: url))
+        guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
+            throw JamendoGenreError.transport
+        }
+        let envelope = try JSONDecoder().decode(JamendoEnvelope.self, from: data)
+        guard envelope.headers.code == 0, envelope.headers.status == "success" else {
+            throw JamendoGenreError.catalogue(envelope.headers.errorMessage)
+        }
+        return envelope.results
+    }
+
     private func fetchTracksPage(tag: String, offset: Int, limit: Int) async throws -> Page {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("tracks"),
