@@ -5,6 +5,11 @@ import ParsoAudioStreaming
 import Combine
 import Network
 
+struct SmartBlendFallbackToken: Equatable, Sendable {
+    let occurrence: QueueOccurrenceID
+    let generation: Int
+}
+
 @MainActor
 public final class AudioPlayer: ObservableObject {
     public static let shared = AudioPlayer()
@@ -201,8 +206,10 @@ public final class AudioPlayer: ObservableObject {
     /// Near-gapless (T2.5): the next queue item, preloaded (with its cache/EQ
     /// attached) so the boundary swap is seamless rather than a fresh teardown.
     var preloadedNextItem: AVPlayerItem?
-    /// Track whose Smart Blend was denied for this edge only; the next mix-deck load of it is skipped once.
-    var smartBlendDeniedTrackID: Int64?
+    /// One ordinary-player fallback, bound to the denied queue occurrence and the queue generation it
+    /// was issued in. The next mix-deck load of that occurrence is skipped once (no recursion into the
+    /// rejected mixer); replacement, seek, stop or any other load invalidates it.
+    var smartBlendFallbackToken: SmartBlendFallbackToken?
     /// The one capability authority and the one reservation authority for Smart Blend.
     var audioCapabilities = AudioAssetCapabilityService.shared
     var resourceCoordinator = ResourceCoordinator.shared
@@ -542,6 +549,7 @@ public final class AudioPlayer: ObservableObject {
     public func seek(to seconds: Double) {
         guard !isAmbient else { return }
         pendingRestoreSeek = nil  // user-initiated seek cancels restore confirmation
+        smartBlendFallbackToken = nil
         if let mixDecks {
             endOutgoingTransitionTail()
             mixDecks.seek(to: seconds)
