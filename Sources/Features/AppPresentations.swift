@@ -26,6 +26,10 @@ struct AppPresentations: ViewModifier {
                 CreatePlaylistSheet()
                     .macSheetFrame(minWidth: 420, minHeight: 480)
             }
+            .sheet(isPresented: $appState.showBlendLab) {
+                BlendLabView(appState: appState)
+                    .macSheetFrame(minWidth: 560, minHeight: 640)
+            }
             .sheet(item: $appState.mixBuilderRequest) { request in
                 MixBuilderSheet(rows: request.rows, lockedFirst: request.lockedFirst,
                                 sourcePlaylist: request.sourcePlaylist,
