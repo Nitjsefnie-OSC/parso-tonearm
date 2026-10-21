@@ -44,6 +44,7 @@ extension AudioPlayer: MixDeckHost {
         let admission = mixDecksAdmission(index: index, outgoing: nil)
         guard admission == .allowSmartBlend else {
             mixDecksLog.notice("smart blend not admitted for current track, playing normally: \(String(describing: admission), privacy: .public)")
+            releaseSmartBlendReservation()
             smartBlendFallback = TransitionFallbackStatus(decision: admission)
             return false
         }
@@ -98,6 +99,7 @@ extension AudioPlayer: MixDeckHost {
     }
 
     func stopMixDecks() {
+        releaseSmartBlendReservation()
         guard let mixDecks else { return }
         mixDecks.stop()
         self.mixDecks = nil
@@ -189,18 +191,57 @@ extension AudioPlayer: MixDeckHost {
         next()
     }
 
-    func mixDecksAdmission(index target: Int, outgoing: Int?) -> TransitionAdmissionDecision {
-        guard queue.indices.contains(target) else { return .gaplessFallback(reason: .unavailableSource) }
-        func metadata(_ i: Int) -> TransitionTrackMetadata {
-            TransitionTrackMetadata(durationSec: queue[i].track.durationSec, sampleRate: queue[i].track.sampleRate)
+    /// Capabilities of the queue row's source from the one authority; never DB duration/rate or a stereo default.
+    func smartBlendCapabilities(at i: Int) -> AudioAssetCapabilities {
+        let row = queue[i]
+        let id = row.asset.map { "asset-\($0.id ?? $0.trackId)" } ?? "track-\(row.track.id ?? -1)"
+        guard let asset = row.asset, let source = mixTrackSource(for: asset) else {
+            return .unresolved(id, .unavailableSource)
         }
-        let sourceAvailable = queue[target].asset.flatMap { mixTrackSource(for: $0) } != nil
-        let outgoingMetadata = outgoing.flatMap { queue.indices.contains($0) ? metadata($0) : nil }
-        return TransitionAdmissionController.decide(outgoing: outgoingMetadata, incoming: metadata(target),
-                                                    sourceAvailable: sourceAvailable, system: .current())
+        switch source {
+        case .remote:
+            return audioCapabilities.capabilities(for: .remoteUncached(key: "remote-\(asset.trackId)"))
+        case .file(let url, _, let securityScoped):
+            let managed = asset.relPath.map { managedURL($0).path == url.path } ?? false
+            if securityScoped || managed { return audioCapabilities.capabilities(for: .local(asset)) }
+            return audioCapabilities.capabilities(for: .file(url, key: "cache-\(url.lastPathComponent)"))
+        }
+    }
+
+    func releaseSmartBlendReservation() {
+        smartBlendReservation?.release()
+        smartBlendReservation = nil
+    }
+
+    func mixDecksAdmission(index target: Int, outgoing: Int?) -> TransitionAdmissionDecision {
+        // A new request replaces any earlier reservation first, so duplicates never stack.
+        releaseSmartBlendReservation()
+        guard queue.indices.contains(target) else { return .gaplessFallback(reason: .unavailableSource) }
+        audioCapabilities.onChange = { [weak self] in
+            Task { @MainActor [weak self] in self?.mixDecks?.upcomingChanged() }
+        }
+        let incoming = smartBlendCapabilities(at: target)
+        let outgoingCaps = outgoing.flatMap { queue.indices.contains($0) ? smartBlendCapabilities(at: $0) : nil }
+        let decision = AudioAssetCapabilityService.decide(outgoing: outgoingCaps, incoming: incoming)
+        guard decision == .allowSmartBlend else { return decision }
+        guard let bytes = AudioAssetCapabilityService.reservationBytes(outgoing: outgoingCaps, incoming: incoming) else {
+            return .gaplessFallback(reason: .unavailableMetadata)
+        }
+        switch resourceCoordinator.reserve(.blendPreparation, bytes: bytes) {
+        case .success(let reservation):
+            smartBlendReservation = reservation
+            return .allowSmartBlend
+        case .failure(let denial):
+            switch denial {
+            case .absoluteCap: return .gaplessFallback(reason: .decodedMemoryBudget)
+            case .invalidRequest: return .gaplessFallback(reason: .unavailableMetadata)
+            default: return .gaplessFallback(reason: .memoryPressure)
+            }
+        }
     }
 
     func mixDecksDenied(index deniedIndex: Int, decision: TransitionAdmissionDecision) {
+        releaseSmartBlendReservation()
         smartBlendFallback = TransitionFallbackStatus(decision: decision)
         transitionPlan = nil
         transitionPrepState = .failed(smartBlendFallback?.message ?? "")
@@ -226,7 +267,9 @@ extension AudioPlayer: MixDeckHost {
 
     func mixDecksCouldNotPlay(index failedIndex: Int, reason: String) {
         let title = queue.indices.contains(failedIndex) ? queue[failedIndex].track.title : "?"
-        mixDecksLog.error("mix decks: skipping \"\(title, privacy: .public)\": \(reason, privacy: .public)")
+        // Diagnostics carry an opaque load ID only: no title, path, URL or error text.
+        mixDecksLog.error("mix decks: skipping load \(UUID().uuidString.prefix(8), privacy: .public): playback error")
+        releaseSmartBlendReservation()
         networkSkipMessage = String(localized: "Skipped \(title): \(reason)", bundle: .module)
         guard failedIndex == index else { return }
         next()

@@ -192,6 +192,12 @@ public final class AudioPlayer: ObservableObject {
     var preloadedNextItem: AVPlayerItem?
     /// Track whose Smart Blend was denied for this edge only; the next mix-deck load of it is skipped once.
     var smartBlendDeniedTrackID: Int64?
+    /// The one capability authority and the one reservation authority for Smart Blend.
+    var audioCapabilities = AudioAssetCapabilityService.shared
+    var resourceCoordinator = ResourceCoordinator.shared
+    /// Held while an admitted whole-track decode/analysis may allocate; released exactly once
+    /// (idempotent) on replacement, denial, stop or fallback.
+    var smartBlendReservation: ResourceCoordinator.Reservation?
     var preloadedNextTrackId: Int64?
     var preloadedNextLoader: CachingResourceLoader?
     var loadedSourceSampleRate: Double = 0

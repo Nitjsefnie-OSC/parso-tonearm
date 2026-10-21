@@ -18,10 +18,23 @@ public enum TransitionAdmissionReason: String, Sendable, Equatable, CaseIterable
     /// Fetching, decoding or analysing the incoming track failed.
     case preparationFailed
     case cancelled
+    /// Technical details are still being read from the file; retried automatically.
+    case preparingDetails
+    /// The file's format cannot be decoded for blending.
+    case unsupportedFormat
+    /// The file could not be read right now; retry later.
+    case temporarilyUnreadable
 
     /// Concise, honest wording for queue / Now Playing surfaces.
     public var message: String {
-        "Continuous playback — smart blend unavailable on this device."
+        switch self {
+        case .preparingDetails: "Continuous playback — smart blend unavailable until track details are read."
+        case .unsupportedFormat: "Continuous playback — smart blend unavailable: unsupported format."
+        case .temporarilyUnreadable: "Continuous playback — smart blend unavailable: audio unreadable, retry later."
+        case .decodedMemoryBudget, .memoryPressure:
+            "Continuous playback — smart blend unavailable: not enough safe memory on this device."
+        default: "Continuous playback — smart blend unavailable on this device."
+        }
     }
 
     /// Spoken label: the result and the reason category.
@@ -36,6 +49,9 @@ public enum TransitionAdmissionReason: String, Sendable, Equatable, CaseIterable
         case .deadline: return "Continuous playback. Smart blend unavailable: next track was not ready in time."
         case .preparationFailed: return "Continuous playback. Smart blend unavailable: could not prepare the next track."
         case .cancelled: return "Continuous playback. Smart blend cancelled."
+        case .preparingDetails: return "Continuous playback. Smart blend unavailable: reading track details."
+        case .unsupportedFormat: return "Continuous playback. Smart blend unavailable: unsupported format."
+        case .temporarilyUnreadable: return "Continuous playback. Smart blend unavailable: audio unreadable, retry later."
         }
     }
 }
