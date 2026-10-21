@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// M5 commit 5.6 — the genre-library connector (§18A, plan 5.6, FR-LIB-9/10).
 ///
@@ -454,6 +455,14 @@ public struct JamendoAPI: Sendable {
             URLQueryItem(name: "audioformat", value: "mp32"),
             URLQueryItem(name: "audiodlformat", value: "mp32"),
         ]
+        // Jamendo only honours the plus-separated id list when each separator
+        // is sent as `%2B`; URLComponents leaves a literal `+` in the query,
+        // which Jamendo reads as a space and answers with zero tracks.
+        // Only the id parameter is rewritten.
+        guard let encodedQuery = components?.percentEncodedQuery else { throw JamendoGenreError.transport }
+        let idPair = "id=" + ids.joined(separator: "+")
+        components?.percentEncodedQuery = encodedQuery.replacingOccurrences(
+            of: idPair, with: "id=" + ids.joined(separator: "%2B"))
         guard let url = components?.url else { throw JamendoGenreError.transport }
         let (data, response) = try await session.data(for: URLRequest(url: url))
         guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
@@ -462,6 +471,11 @@ public struct JamendoAPI: Sendable {
         let envelope = try JSONDecoder().decode(JamendoEnvelope.self, from: data)
         guard envelope.headers.code == 0, envelope.headers.status == "success" else {
             throw JamendoGenreError.catalogue(envelope.headers.errorMessage)
+        }
+        let matching = Set(envelope.results.map(\.id)).intersection(ids).count
+        if envelope.results.isEmpty || matching < ids.count {
+            Logger(subsystem: "guru.parso.platterhead", category: "jamendo").info(
+                "Jamendo id lookup: requested \(ids.count, privacy: .public), returned \(envelope.results.count, privacy: .public), matching \(matching, privacy: .public), status \(envelope.headers.status, privacy: .public), code \(envelope.headers.code, privacy: .public)")
         }
         return envelope.results
     }
