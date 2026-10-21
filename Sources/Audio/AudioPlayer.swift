@@ -9,7 +9,15 @@ import Network
 public final class AudioPlayer: ObservableObject {
     public static let shared = AudioPlayer()
 
-    @Published public internal(set) var queue: [TrackRow] = []
+    @Published public internal(set) var queue: [TrackRow] = [] {
+        didSet { reconcileQueueOccurrences(old: oldValue) }
+    }
+    /// One stable identity per queue slot, parallel to `queue`. Survives reorder and delete;
+    /// the same track queued twice has two identities.
+    public internal(set) var queueOccurrences: [QueueOccurrenceID] = []
+    /// Execution snapshots emitted by the mix-deck scheduler/renderer, keyed by occurrence edge.
+    /// A value type: copies handed to views never change.
+    @Published public internal(set) var transitionExecution = TransitionExecutionLedger()
     @Published public internal(set) var index: Int = 0
     @Published public internal(set) var isPlaying = false
     @Published public internal(set) var isStalled = false
@@ -307,6 +315,7 @@ public final class AudioPlayer: ObservableObject {
         unshuffledQueue = []
         queueSource = source
         queue = tracks
+        replaceQueueOccurrences()
         index = max(0, min(start, tracks.count - 1))
         // A manually-started queue begins a fresh Keep Playing session: no
         // history to avoid repeating, nothing auto-added yet. Cancel any

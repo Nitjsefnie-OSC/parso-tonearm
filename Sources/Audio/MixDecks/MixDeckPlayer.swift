@@ -35,6 +35,12 @@ protocol MixDeckHost: AnyObject, Sendable {
     func mixDecksAdmission(index: Int, outgoing: Int?) -> TransitionAdmissionDecision
     /// The track at `index` was denied; it plays normally (never skipped).
     func mixDecksDenied(index: Int, decision: TransitionAdmissionDecision)
+    /// The current queue generation; changes whenever the queue's occurrences change.
+    var mixDecksQueueGeneration: Int { get }
+    /// The stable occurrence identity of the queue slot at `index`.
+    func mixDecksOccurrence(at index: Int) -> QueueOccurrenceID?
+    /// What the renderer actually scheduled/played for an occurrence edge.
+    func mixDecksExecution(_ event: MixDeckExecutionEvent)
 }
 
 extension MixDeckHost {
@@ -44,6 +50,22 @@ extension MixDeckHost {
 
 extension MixDeckHost {
     func mixDecksOutgoingDidFinish() {}
+    var mixDecksQueueGeneration: Int { 0 }
+    func mixDecksOccurrence(at index: Int) -> QueueOccurrenceID? { nil }
+    func mixDecksExecution(_ event: MixDeckExecutionEvent) {}
+}
+
+/// What the renderer actually did for one occurrence edge, reported as it happens.
+enum MixDeckExecutionEvent: Sendable {
+    case scheduled(key: TransitionEdgeKey, generation: Int, requested: TransitionDisplayStyle,
+                   planned: TransitionDisplayStyle, executed: TransitionDisplayStyle,
+                   reason: TransitionExecutionReason?, overlapStartFrame: Int64?, overlapEndFrame: Int64?,
+                   handoffFrame: Int64, sampleRate: Double)
+    case overlapBegan(key: TransitionEdgeKey, generation: Int, atFrame: Int64)
+    case handedOff(key: TransitionEdgeKey, generation: Int, atFrame: Int64)
+    case outgoingFinished(key: TransitionEdgeKey, generation: Int, atFrame: Int64)
+    /// The decks restarted or stopped: everything not yet handed off is void.
+    case reset(TransitionExecutionReason)
 }
 
 /// How one track hands over to the next on the mix decks.
@@ -119,6 +141,10 @@ final class MixDeckPlayer {
         /// The handover it was scheduled for (a late blend falls back to a follow-on
         /// but is still the `.blend` edge).
         let edge: MixDeckEdge
+        /// Occurrence identity captured when scheduled, so later queue edits cannot retarget it.
+        var key: TransitionEdgeKey? = nil
+        var generation = 0
+        var overlapReported = false
     }
 
     /// What a planning in flight is for; a matching request leaves it running.
@@ -243,7 +269,9 @@ final class MixDeckPlayer {
             upcoming = nil
         }
         // A restart (skip, seek, back) discards any overlap: the old outgoing tail is gone with the reset.
+        host.mixDecksExecution(.reset(.restarted))
         tailDeck = nil
+        tailKey = nil
         scheduled = nil
         current = nil
         if let safety, !safety.enter(.startingCurrent) {
@@ -314,6 +342,8 @@ final class MixDeckPlayer {
     }
 
     func stop() {
+        host.mixDecksExecution(.reset(.stopped))
+        tailKey = nil
         safety?.resolve(.cancelled)
         epoch += 1
         startTask?.cancel()
@@ -492,6 +522,7 @@ final class MixDeckPlayer {
         plan.incomingGain = min(max(current.gain * plan.incomingGain, Self.gainRange.lowerBound), Self.gainRange.upperBound)
         let edge = blendsEnabled ? host.mixDecksEdge(from: host.mixDecksCurrentIndex, to: upcoming.index) : .gapless
         let join = plan.style == .phraseCut ? plan.blendStart - 0.003 : plan.blendStart
+        let plannedDisplay: TransitionDisplayStyle = plan.style == .phraseCut ? .phraseBlend : .beatMatched
         do {
             if edge == .blend, join > nowPlayed + Self.scheduleLeadSeconds {
                 try mix.schedule(plan, outgoing: current.deck, outgoingStartFrame: Int64(current.zeroFrame.rounded()),
@@ -504,6 +535,8 @@ final class MixDeckPlayer {
                 let flip = plan.style == .phraseCut ? plan.blendStart : plan.swapTime
                 scheduled = Scheduled(incoming: incoming, joinFrame: outgoingZero + join * sr,
                                       flipFrame: outgoingZero + flip * sr, edge: edge)
+                reportScheduled(planned: plannedDisplay, executed: plannedDisplay, reason: nil,
+                                requested: plannedDisplay, incomingIndex: upcoming.index)
                 _ = safety?.enter(.scheduled)   // already journaled active; a failed phase update leaves the earlier phase on disk
                 host.mixDecksPublish(plan: BlendPlanCache.transitionPlan(plan, from: current.trackID,
                                                                          to: upcoming.audio.trackID,
@@ -528,6 +561,19 @@ final class MixDeckPlayer {
                                 audio: upcoming.audio, tempo: 1, gain: plan.incomingGain,
                                 zeroFrame: startFrame, played: nil, playedAnalysis: nil)
             scheduled = Scheduled(incoming: incoming, joinFrame: startFrame, flipFrame: startFrame, edge: edge)
+            let requested: TransitionDisplayStyle = switch edge {
+            case .blend: plannedDisplay
+            case .fade: .plainCrossfade
+            case .gapless: .gapless
+            }
+            let reason: TransitionExecutionReason = switch edge {
+            case .blend: .lateForPlannedBlend
+            case .fade: .plainFadeEdge
+            case .gapless: .gaplessEdge
+            }
+            reportScheduled(planned: plannedDisplay, executed: TransitionDisplayStyle(style),
+                            reason: edge == .fade && style == .plainCrossfade ? nil : reason,
+                            requested: requested, incomingIndex: upcoming.index)
             host.mixDecksPublish(plan: TransitionPlan(fromTrackID: current.trackID, toTrackID: upcoming.audio.trackID,
                                                       style: style, exitTime: current.duration,
                                                       overlapSeconds: style == .plainCrossfade ? Self.plainFadeSeconds : 0),
@@ -535,6 +581,24 @@ final class MixDeckPlayer {
         } catch {
             Self.log.error("mix decks: scheduling failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Reports to the host exactly what was just scheduled on the renderer.
+    private func reportScheduled(planned: TransitionDisplayStyle, executed: TransitionDisplayStyle,
+                                 reason: TransitionExecutionReason?, requested: TransitionDisplayStyle,
+                                 incomingIndex: Int) {
+        guard let current, scheduled != nil,
+              let key = occurrenceKey(outgoing: host.mixDecksCurrentIndex, incoming: incomingIndex) else { return }
+        let generation = host.mixDecksQueueGeneration
+        scheduled?.key = key
+        scheduled?.generation = generation
+        let join = Int64(scheduled?.joinFrame ?? 0), flip = Int64(scheduled?.flipFrame ?? 0)
+        host.mixDecksExecution(.scheduled(key: key, generation: generation, requested: requested,
+                                          planned: planned, executed: executed,
+                                          reason: reason, overlapStartFrame: executed.overlaps ? join : nil,
+                                          overlapEndFrame: executed.overlaps ? flip : nil,
+                                          handoffFrame: flip, sampleRate: Self.sampleRate))
+        _ = current
     }
 
     // MARK: - Clock
@@ -552,6 +616,12 @@ final class MixDeckPlayer {
 
     /// The deck that handed over at the last flip, until it has fully played out.
     private var tailDeck: MixDeck?
+    private var tailKey: (key: TransitionEdgeKey, generation: Int)?
+
+    private func occurrenceKey(outgoing: Int, incoming: Int) -> TransitionEdgeKey? {
+        guard let from = host.mixDecksOccurrence(at: outgoing), let to = host.mixDecksOccurrence(at: incoming) else { return nil }
+        return TransitionEdgeKey(from: from, to: to)
+    }
 
     func tick() {
         guard let current else { return }
@@ -559,6 +629,10 @@ final class MixDeckPlayer {
         let now = Double(mix.masterFrame)
         if let scheduled, now >= scheduled.flipFrame {
             var incoming = scheduled.incoming
+            if let key = scheduled.key {
+                host.mixDecksExecution(.handedOff(key: key, generation: scheduled.generation, atFrame: Int64(now)))
+                tailKey = (key, scheduled.generation)
+            }
             tailDeck = current.deck
             self.scheduled = nil
             upcoming = nil
@@ -570,8 +644,17 @@ final class MixDeckPlayer {
             return
         }
         if let seconds = currentSeconds { host.mixDecksPosition(seconds: seconds) }
+        if let scheduled, scheduled.edge == .blend, !scheduled.overlapReported, now >= scheduled.joinFrame,
+           let key = scheduled.key {
+            self.scheduled?.overlapReported = true
+            host.mixDecksExecution(.overlapBegan(key: key, generation: scheduled.generation, atFrame: Int64(now)))
+        }
         if let tail = tailDeck, mix.state(of: tail) == .finished {
             tailDeck = nil
+            if let tailKey {
+                host.mixDecksExecution(.outgoingFinished(key: tailKey.key, generation: tailKey.generation, atFrame: Int64(now)))
+            }
+            tailKey = nil
             host.mixDecksOutgoingDidFinish()
         }
         if let safety {

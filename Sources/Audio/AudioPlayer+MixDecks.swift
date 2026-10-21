@@ -109,6 +109,77 @@ extension AudioPlayer: MixDeckHost {
         transitionPrepState = .ready
     }
 
+    // MARK: - Execution snapshots
+
+    /// Keeps `queueOccurrences` parallel to `queue` after any edit, matching surviving rows in
+    /// order so reorder/delete/insert keep identities and duplicates stay distinct. A change of
+    /// identities advances the generation, which cancels edges that are no longer adjacent.
+    func reconcileQueueOccurrences(old: [TrackRow]) {
+        var oldOccurrences = queueOccurrences
+        if oldOccurrences.count != old.count { oldOccurrences = old.map { _ in QueueOccurrenceID() } }
+        var used = Set<Int>()
+        var cursor = 0
+        var result: [QueueOccurrenceID] = []
+        for row in queue {
+            let match = (cursor..<old.count).first { !used.contains($0) && old[$0].track.id == row.track.id }
+                ?? old.indices.first { !used.contains($0) && old[$0].track.id == row.track.id }
+            if let match {
+                used.insert(match)
+                cursor = match + 1
+                result.append(oldOccurrences[match])
+            } else {
+                result.append(QueueOccurrenceID())
+            }
+        }
+        guard result != queueOccurrences || oldOccurrences.count != queueOccurrences.count else { return }
+        queueOccurrences = result
+        transitionExecution.advanceGeneration(order: result, loops: repeatMode == .all)
+    }
+
+    /// A replacement queue shares no identities with the old one, even for the same tracks.
+    func replaceQueueOccurrences() {
+        transitionExecution.cancelAll(reason: .replaced)
+        queueOccurrences = queue.map { _ in QueueOccurrenceID() }
+        transitionExecution.advanceGeneration(order: queueOccurrences, loops: repeatMode == .all)
+    }
+
+    private func mixDecksEdgeKey(from: Int, to: Int) -> TransitionEdgeKey? {
+        guard let a = mixDecksOccurrence(at: from), let b = mixDecksOccurrence(at: to) else { return nil }
+        return TransitionEdgeKey(from: a, to: b)
+    }
+
+    var mixDecksQueueGeneration: Int { transitionExecution.generation }
+
+    func mixDecksOccurrence(at index: Int) -> QueueOccurrenceID? {
+        queueOccurrences.indices.contains(index) ? queueOccurrences[index] : nil
+    }
+
+    func mixDecksExecution(_ event: MixDeckExecutionEvent) {
+        switch event {
+        case let .scheduled(key, generation, requested, planned, executed, reason, start, end, handoff, rate):
+            transitionExecution.record(key, generation: generation,
+                                       .scheduled(requested: requested, planned: planned, executed: executed,
+                                                  readiness: .ready, reason: reason, overlapStart: start,
+                                                  overlapEnd: end, handoff: handoff, sampleRate: rate))
+        case let .overlapBegan(key, generation, frame):
+            transitionExecution.record(key, generation: generation, .overlapBegan(atFrame: frame))
+        case let .handedOff(key, generation, frame):
+            transitionExecution.record(key, generation: generation, .handedOff(atFrame: frame))
+        case let .outgoingFinished(key, generation, frame):
+            transitionExecution.outgoingFinished(key, generation: generation, atFrame: frame)
+        case .reset(let reason):
+            transitionExecution.cancelAll(reason: reason)
+        }
+    }
+
+    /// The execution snapshot for the edge leaving queue slot `slot`, nil when none was emitted.
+    public func transitionExecutionSnapshot(afterQueueIndex slot: Int) -> TransitionExecutionSnapshot? {
+        guard queueOccurrences.indices.contains(slot) else { return nil }
+        let nextSlot = slot + 1 < queueOccurrences.count ? slot + 1 : (repeatMode == .all ? 0 : nil)
+        guard let nextSlot else { return nil }
+        return transitionExecution.snapshot(for: TransitionEdgeKey(from: queueOccurrences[slot], to: queueOccurrences[nextSlot]))
+    }
+
     // MARK: - MixDeckHost
 
     var mixDecksCurrentIndex: Int { index }
@@ -243,6 +314,11 @@ extension AudioPlayer: MixDeckHost {
     func mixDecksDenied(index deniedIndex: Int, decision: TransitionAdmissionDecision) {
         releaseSmartBlendReservation()
         smartBlendFallback = TransitionFallbackStatus(decision: decision)
+        if let from = mixDecksOccurrence(at: index), let to = mixDecksOccurrence(at: deniedIndex), deniedIndex != index {
+            transitionExecution.record(TransitionEdgeKey(from: from, to: to), generation: transitionExecution.generation,
+                                       .denied(.admissionDenied(smartBlendFallback?.message ?? ""),
+                                               readiness: .failed(smartBlendFallback?.message ?? "")))
+        }
         transitionPlan = nil
         transitionPrepState = .failed(smartBlendFallback?.message ?? "")
         // Per-edge only: the "Everywhere" preference is untouched.
@@ -291,6 +367,10 @@ extension AudioPlayer: MixDeckHost {
     }
 
     func mixDecksPublish(plan: TransitionPlan?, state: GridPrepState) {
+        if let next = mixDecksUpcomingIndex(after: index), let key = mixDecksEdgeKey(from: index, to: next),
+           transitionExecution.snapshot(for: key)?.isTerminal != true {
+            transitionExecution.record(key, generation: transitionExecution.generation, .readiness(state))
+        }
         if isOutgoingTransitionTailAudible {
             deferredTransitionPlan = (plan, state)
             return
