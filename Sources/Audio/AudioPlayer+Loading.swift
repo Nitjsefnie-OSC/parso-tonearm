@@ -54,6 +54,7 @@ extension AudioPlayer {
         }
 
         if wantsMixDecks, loadCurrentOnMixDecks(row: row, autoplay: autoplay) { return }
+        smartBlendFallbackToken = nil
         stopMixDecks()
         cancelCrossfade(resetVolume: true)
         shutdownLoaders()

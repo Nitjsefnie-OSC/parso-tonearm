@@ -237,7 +237,7 @@ public enum TransitionExecutedKind: String, Sendable, Equatable, CaseIterable {
         switch self {
         case .overlapCrossfade: "Crossfade"
         case .fadeOutFadeIn: "Fade out, fade in"
-        case .sequentialHandoff: "Continuous playback"
+        case .sequentialHandoff: "Sequential handoff"
         case .gapless: "Gapless"
         }
     }
