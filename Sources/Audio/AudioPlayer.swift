@@ -239,6 +239,8 @@ public final class AudioPlayer: ObservableObject {
     /// preloaded next item so EQ survives near-gapless swaps.
     var eqTap: EQAudioTap?
     let pathMonitor = NWPathMonitor()
+    /// Whether the network path is currently usable (for pre-playback preparation gates).
+    public var isNetworkAvailable: Bool { pathMonitor.currentPath.status == .satisfied }
     let pathMonitorQueue = DispatchQueue(label: "guru.parso.tonearm.network")
     var sleepTimerTask: Task<Void, Never>?
 

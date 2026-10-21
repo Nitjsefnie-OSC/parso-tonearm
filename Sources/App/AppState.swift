@@ -160,6 +160,16 @@ final class AppState: ObservableObject {
             try await JamendoAPI(clientID: JamendoAppConfig.clientID,
                                  baseURL: JamendoAppConfig.baseURL).tracks(ids: ids)
         },
+        prepare: { rows, progress in
+            await BlendPreparation.prepare(
+                rows: rows,
+                gate: { row in
+                    guard row.asset?.kind == .remote else { return nil }
+                    return AudioPlayer.shared.isNetworkAvailable ? nil : .waitingForNetwork
+                },
+                blends: { _, _ in true },
+                progress: progress)
+        },
         start: { request in
             AudioPlayer.shared.play(tracks: request.rows, startAt: 0)
         })
