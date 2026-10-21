@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "audioFormat": "aac-lc-128k-m4a",
+  "blends": [
+    {"id":"starter.morning-light","title":"Morning Light","tracks":["1884163","1876521","1892244","1869875","1873110","1890332"]},
+    {"id":"starter.deep-focus","title":"Deep Focus","tracks":["1856120","1861977","1879406","1884521","1865003","1870618"]},
+    {"id":"starter.night-drive","title":"Night Drive","tracks":["1877801","1881290","1863347","1888952","1859614","1874025"]},
+    {"id":"starter.acoustic-evening","title":"Acoustic Evening","tracks":["1867332","1872840","1890117","1855491","1882706","1868259"]},
+    {"id":"starter.upbeat-energy","title":"Upbeat Energy","tracks":["1878644","1860823","1886037","1871552","1893408","1857790"]},
+    {"id":"starter.rainy-day","title":"Rainy Day","tracks":["1862095","1875318","1889731","1858246","1883459","1866871"]}
+  ]
+}
