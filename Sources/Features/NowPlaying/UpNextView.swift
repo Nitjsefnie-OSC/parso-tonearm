@@ -5,6 +5,7 @@ struct UpNextView: View {
     @EnvironmentObject var player: AudioPlayer
     @EnvironmentObject var appState: AppState
     @EnvironmentObject private var transitionPrep: TransitionPrepService
+    @State private var selectedEdge: QueueEdgeKey?
     #if os(iOS)
     @State private var editMode: EditMode = .inactive
     #endif
@@ -19,6 +20,22 @@ struct UpNextView: View {
     /// auto-added tail was cleared).
     private var firstAutoAddedOffset: Int? {
         player.queue.firstIndex { player.keepPlayingAutoAddedTrackIDs.contains($0.id) }
+    }
+
+    /// Per-edge rows from the live queue, the occurrence identities and the renderer snapshots.
+    private var edgeRows: [QueueEdgeRow] {
+        QueueEdgeResolver.rows(
+            trackIDs: player.queue.map(\.track.id), currentIndex: player.index,
+            repeatMode: player.repeatMode, smartBlendEnabled: player.smartTransitionsEnabled,
+            live: player.transitionPresentation, occurrences: player.queueOccurrences,
+            snapshot: { player.transitionExecutionSnapshot(afterQueueIndex: $0) },
+            noBlend: player.noBlendEdges)
+    }
+
+    /// The selected edge while it still names the same occurrence pair; nil dismisses the detail.
+    private var selectedEdgeBinding: Binding<QueueEdgeRow?> {
+        Binding(get: { QueueEdgeResolver.resolve(selectedEdge, in: edgeRows) },
+                set: { selectedEdge = $0?.key })
     }
 
     private var queueSignature: [Int64] { player.queue.map(\.id) }
@@ -132,10 +149,7 @@ struct UpNextView: View {
                     .foregroundStyle(Palette.inkTertiary)
                     .padding(.vertical, 8)
             } else {
-                let edges = Dictionary(uniqueKeysWithValues: QueueEdgeResolver.rows(
-                    trackIDs: player.queue.map(\.track.id), currentIndex: player.index,
-                    repeatMode: player.repeatMode, smartBlendEnabled: player.smartTransitionsEnabled,
-                    live: player.transitionPresentation).map { ($0.key.position, $0) })
+                let edges = Dictionary(uniqueKeysWithValues: edgeRows.map { ($0.key.position, $0) })
                 List {
                     ForEach(Array(player.queue.enumerated()), id: \.offset) { offset, row in
                         VStack(alignment: .leading, spacing: 4) {
@@ -145,9 +159,14 @@ struct UpNextView: View {
                             QueueRow(row: row,
                                      position: offset + 1,
                                      isCurrent: offset == player.index,
+                                     isUpNext: offset == player.index + 1,
                                      queueIndex: offset)
                             if let edge = edges[offset] {
-                                QueueTransitionConnector(edge: edge).id(edge.key)
+                                QueueTransitionConnector(edge: edge, isSelected: edge.key == selectedEdge,
+                                         incomingPosition: edge.key.position + 1 < player.queue.count ? edge.key.position + 2 : 1) {
+                                    selectedEdge = edge.key
+                                }
+                                .id(edge.key)
                             }
                         }
                             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
@@ -183,6 +202,12 @@ struct UpNextView: View {
         .padding(.vertical, 10)
         .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Palette.hairline))
+        .sheet(item: selectedEdgeBinding) { edge in
+            QueueEdgeDetailSheet(edge: edge,
+                                 outgoing: player.queue.indices.contains(edge.key.position) ? player.queue[edge.key.position] : nil,
+                                 incoming: queueRow(after: edge.key.position),
+                                 incomingPosition: edge.key.position + 1 < player.queue.count ? edge.key.position + 2 : 1)
+        }
         .task {
             if case .mix = player.queueSource {
                 transitionPrep.prepare(rows: transitionRows, appState: appState, allowsCellular: player.isPlayingMix)
@@ -194,9 +219,15 @@ struct UpNextView: View {
         }
     }
 
+    private func queueRow(after position: Int) -> TrackRow? {
+        guard !player.queue.isEmpty else { return nil }
+        let next = position + 1 < player.queue.count ? position + 1 : 0
+        return player.queue[next]
+    }
+
     private var queueListHeight: CGFloat {
         let visibleRows = min(max(player.queue.count, 1), 6)
-        return CGFloat(visibleRows) * 96
+        return CGFloat(visibleRows) * 150
     }
 
     /// The obvious, discoverable Keep Playing control (CLAUDE.md "no silent/
@@ -271,6 +302,7 @@ private struct QueueRow: View {
     let row: TrackRow
     let position: Int
     let isCurrent: Bool
+    var isUpNext = false
     let queueIndex: Int
     @EnvironmentObject var player: AudioPlayer
 
@@ -310,8 +342,13 @@ private struct QueueRow: View {
                     .foregroundStyle(Palette.inkTertiary)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
         .frame(minHeight: 44)
+        .background(isCurrent ? Palette.accent.opacity(0.12) : Palette.ink.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(isCurrent ? Palette.accent : Palette.hairline, lineWidth: isCurrent ? 2 : 1))
         .contentShape(Rectangle())
         .onTapGesture {
             player.skipToIndex(queueIndex)
@@ -320,7 +357,8 @@ private struct QueueRow: View {
         .accessibilityLabel(QueueAccessibility.rowLabel(
             position: position, title: row.track.title,
             artist: row.artist?.name ?? row.album?.artist ?? ""))
-        .accessibilityValue(QueueAccessibility.rowValue(isCurrent: isCurrent))
+        .accessibilityValue(QueueAccessibility.rowValue(isCurrent: isCurrent, isUpNext: isUpNext,
+                                                        duration: row.track.durationSec))
         .accessibilityHint(QueueAccessibility.rowHint(isCurrent: isCurrent))
         .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { player.skipToIndex(queueIndex) }

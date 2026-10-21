@@ -10,9 +10,31 @@ public enum QueueAccessibility {
         return "\(position), \(name)"
     }
 
-    public static func rowValue(isCurrent: Bool) -> String {
-        isCurrent ? "Now playing" : ""
+    public static func rowValue(isCurrent: Bool, isUpNext: Bool = false, duration: Double? = nil) -> String {
+        var parts: [String] = []
+        if isCurrent { parts.append("Now playing") } else if isUpNext { parts.append("Up next") }
+        if let duration, duration > 0 { parts.append(spokenDuration(duration)) }
+        return parts.joined(separator: ", ")
     }
+
+    /// "3 minutes 5 seconds" — spoken, not the "3:05" clock face.
+    public static func spokenDuration(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded()), 0)
+        let style = Duration.UnitsFormatStyle(
+            allowedUnits: [.minutes, .seconds], width: .wide, zeroValueUnits: .hide)
+        return Duration.seconds(total).formatted(style)
+    }
+
+    /// Spoken state of a transition connector between two occurrences.
+    public static func edgeValue(isActive: Bool, isSelected: Bool, incomingPosition: Int) -> String {
+        var parts: [String] = []
+        if isActive { parts.append("Blending now") }
+        parts.append("Into track \(incomingPosition)")
+        if isSelected { parts.append("Selected") }
+        return parts.joined(separator: ", ")
+    }
+
+    public static let edgeHint = "Opens details and actions for this transition"
 
     public static func rowHint(isCurrent: Bool) -> String {
         isCurrent ? "Currently playing" : "Plays this track now"

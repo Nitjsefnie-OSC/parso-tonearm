@@ -15,6 +15,9 @@ public final class AudioPlayer: ObservableObject {
     /// One stable identity per queue slot, parallel to `queue`. Survives reorder and delete;
     /// the same track queued twice has two identities.
     public internal(set) var queueOccurrences: [QueueOccurrenceID] = []
+    /// Edges the listener asked to play without a blend. Keyed by occurrence pair, so a duplicate
+    /// or reordered edge is never affected; pruned when either end leaves the queue.
+    @Published public internal(set) var noBlendEdges: Set<TransitionEdgeKey> = []
     /// Execution snapshots emitted by the mix-deck scheduler/renderer, keyed by occurrence edge.
     /// A value type: copies handed to views never change.
     @Published public internal(set) var transitionExecution = TransitionExecutionLedger()
