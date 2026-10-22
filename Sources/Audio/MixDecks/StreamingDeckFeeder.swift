@@ -18,7 +18,7 @@ actor StreamingDeckFeeder {
         self.buffer = buffer; self.source = source; self.maxChunkFrames = maxChunkFrames
     }
 
-    convenience init(buffer: BoundedDeckBuffer, source: any DeckChunkSource, maxChunkFrames: Int = 8_192) {
+    init(buffer: BoundedDeckBuffer, source: any DeckChunkSource, maxChunkFrames: Int = 8_192) {
         self.init(buffer: buffer, source: SynchronousDeckChunkSource(source), maxChunkFrames: maxChunkFrames)
     }
 
