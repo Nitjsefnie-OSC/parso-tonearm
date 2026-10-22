@@ -10,7 +10,7 @@ final class BoundedDeckCommandMailboxTests: XCTestCase {
         mailbox.begin(total: 2_000, start: 300, tempo: 1.1)
         mailbox.consume(into: mixer)
         XCTAssertEqual(mixer.decks[mixer.main].totalFrames, 2_000)
-        XCTAssertEqual(mixer.decks[mixer.main].generation, 1)
+        XCTAssertEqual(mixer.decks[mixer.main].generation, 2)
         // The target is visible to the producer only after it begins filling.
         XCTAssertEqual(mixer.decks[mixer.main].nextRequest().startFrame, 300)
     }
