@@ -197,13 +197,16 @@ final class StarterBlendProductionPathTests: XCTestCase {
     func testKeepPlayingContinuesFromBlendEligibleCatalogTracksWithoutAModel() async throws {
         let blend = StarterBlendCatalog.blends[1]            // deep-focus: catalog candidates exist after its last track
         let factory = SynthCatalog.Factory(blend)
-        // Starter rows carry no key analysis, so give the tail a key and add one stored-fact candidate.
+        // Seeded starter rows are unindexed (the catalog has no beat grid), so index the tail as normal indexing
+        // would (grid, loudness, traits) and add one stored-fact candidate.
         let tailKey = BlendCatalogTrack.key(pack: .v1, trackID: blend.trackIDs.last!)
         let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: "9000001")
         let tailFacts = try XCTUnwrap(StarterBlendPack.trackFacts[blend.trackIDs.last!])
         try await LibraryStore.shared.dbQueue.write { db in
             var tail = try XCTUnwrap(BlendCatalogTrack.fetchOne(db, key: tailKey))
-            tail.camelotKey = "8A"; try tail.update(db)
+            tail.camelotKey = "8A"; tail.genre = blend.genre; tail.subgenre = blend.subgenre
+            tail.state = .blendEligible; tail.beatPeriod = tailFacts.beatPeriod; tail.beatPhase = tailFacts.beatPhase
+            tail.rmsDB = tailFacts.rmsDB; try tail.update(db)
             try BlendCatalogTrack(catalogKey: candidateKey, packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
                                   durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
                                   beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
