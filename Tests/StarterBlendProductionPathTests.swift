@@ -195,38 +195,44 @@ final class StarterBlendProductionPathTests: XCTestCase {
         XCTAssertNil(BlendReplay.starterRequest(for: doc))
     }
 
-    /// Catalog traits of the Deep Focus tail in this fixture (catalog data, not starter-definition data).
-    private nonisolated static let genre = "Electronic", subgenre = "Synthwave"
-
-    func testKeepPlayingContinuesFromBlendEligibleCatalogTracksWithoutAModel() async throws {
-        let blend = StarterBlendCatalog.blends[1]            // deep-focus: catalog candidates exist after its last track
-        let factory = SynthCatalog.Factory(blend)
-        // Seeded starter rows are unindexed (the catalog has no beat grid), so index the tail as normal indexing
-        // would (grid, loudness, traits) and add one stored-fact candidate.
-        let tailKey = BlendCatalogTrack.key(pack: .v1, trackID: blend.trackIDs.last!)
-        // Candidates must be mirrored Starter assets (only those have a Release URL); borrow IDs from another blend.
-        let spare = StarterBlendCatalog.blends[0].trackIDs.filter { !blend.trackIDs.contains($0) }
-        XCTAssertGreaterThanOrEqual(spare.count, 3)
-        let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: spare[0])
-        let tailFacts = try XCTUnwrap(StarterTestFacts.byID[blend.trackIDs.last!])
-        try await LibraryStore.shared.dbQueue.write { db in
-            var tail = try XCTUnwrap(BlendCatalogTrack.fetchOne(db, key: tailKey))
-            tail.camelotKey = "8A"; tail.genre = Self.genre; tail.subgenre = Self.subgenre
-            tail.state = .blendEligible; tail.beatPeriod = tailFacts.beatPeriod; tail.beatPhase = tailFacts.beatPhase
-            tail.rmsDB = tailFacts.rmsDB; try tail.update(db)
-            try BlendCatalogTrack(catalogKey: candidateKey, packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
-                                  durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
-                                  beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
-                                  genre: Self.genre, subgenre: Self.subgenre, camelotKey: "9A").save(db)
-            // Same tempo but wrong subgenre / key: must never be chosen.
-            for (id, sub, key) in [(spare[1], "Progressive House", "9A"), (spare[2], Self.subgenre, "3A")] {
-                try BlendCatalogTrack(catalogKey: BlendCatalogTrack.key(pack: .v1, trackID: id),
-                                      packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
-                                      durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
-                                      beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
-                                      genre: Self.genre, subgenre: sub, camelotKey: key).save(db)
+    /// Indexes every seeded Starter row through the store's own lifecycle API (`markBlendEligible`), keeping the
+    /// catalog's genuine genre / key / source; only the beat grid (which the catalog lacks) comes from the fixture.
+    /// The seeded catalog gives every blend a distinct genre, so no row follows another blend's tail; `follower`
+    /// is the one mirrored row indexed with the tail's genre and a Camelot-adjacent key (as real indexing would store).
+    private func indexSeededCatalog(follower: String? = nil, after tailID: String? = nil) async throws -> [BlendCatalogTrack] {
+        let store = LibraryStore.shared
+        let rows = try await store.blendCatalogTracks(atLeast: .unindexed, packTag: StarterBlendPack.v1.releaseTag)
+        let tailTraits = rows.first { $0.trackID == tailID }?.traits
+        for row in rows where row.state == .unindexed {
+            guard var traits = row.traits, let fixture = StarterTestFacts.byID[row.trackID] else { continue }
+            var facts = StarterTrackFacts(id: row.trackID, durationSeconds: row.durationSeconds ?? fixture.durationSeconds,
+                                          bpm: row.bpm ?? fixture.bpm, beatPeriod: fixture.beatPeriod,
+                                          beatPhase: fixture.beatPhase, rmsDB: fixture.rmsDB)
+            if row.trackID == follower, let tailTraits, let tail = tailID.flatMap({ StarterTestFacts.byID[$0] }) {
+                traits = BlendTraits(genre: tailTraits.genre, subgenre: tailTraits.subgenre, camelotKey: "9A")
+                facts = StarterTrackFacts(id: row.trackID, durationSeconds: 240, bpm: tail.bpm, beatPeriod: tail.beatPeriod,
+                                          beatPhase: 0.2, rmsDB: tail.rmsDB)
             }
+            try await store.markBlendEligible(key: row.catalogKey, facts: facts, traits: traits)
         }
+        return try await store.blendCatalogTracks(atLeast: .blendEligible, packTag: StarterBlendPack.v1.releaseTag)
+    }
+
+    func testKeepPlayingContinuesFromGenuineCatalogRowsWithoutAModel() async throws {
+        let blend = StarterBlendCatalog.blends[1]
+        let factory = SynthCatalog.Factory(blend)
+        let spare = try XCTUnwrap(StarterBlendCatalog.blends[0].trackIDs.first { !blend.trackIDs.contains($0) })
+        let indexed = try await indexSeededCatalog(follower: spare, after: blend.trackIDs.last)
+        let tail = try XCTUnwrap(indexed.first { $0.trackID == blend.trackIDs.last })
+        let tailTraits = try XCTUnwrap(tail.traits)
+        let tailFacts = try XCTUnwrap(tail.facts)
+        let expected = indexed.filter { row in
+            guard !blend.trackIDs.contains(row.trackID), row.isKeepPlayingCandidate(in: .v1),
+                  let traits = row.traits, let facts = row.facts else { return false }
+            return tailTraits.isCompatible(with: traits)
+                && CatalogEdgePlanner.plan(blendID: blend.id, edge: 6, outgoing: tailFacts, incoming: facts) != nil
+        }
+        XCTAssertFalse(expected.isEmpty, "the seeded catalog must hold a genuinely compatible follower for this tail")
         let player = try await start(blend, factory: factory)
         struct Forbidden: KeepPlayingSimilarityProviding {
             func continuationTrackIDs(after recentlyPlayed: [Int64], excluding: Set<Int64>,
@@ -246,8 +252,9 @@ final class StarterBlendProductionPathTests: XCTestCase {
         let catalogRows = try await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible)
         let eligible = Set(catalogRows.map(\.trackID))
         for id in session.trackIDs.dropFirst(6) { XCTAssertTrue(eligible.contains(id), "\(id) is blend-eligible") }
-        XCTAssertEqual(session.trackIDs.dropFirst(6).first, spare[0], "only the compatible candidate is admitted")
-        XCTAssertFalse(session.trackIDs.contains(spare[1]) || session.trackIDs.contains(spare[2]))
+        let admitted = Set(expected.map(\.trackID))
+        for id in session.trackIDs.dropFirst(6) { XCTAssertTrue(admitted.contains(id), "\(id) satisfies every catalog rule") }
+        XCTAssertFalse(session.trackIDs.dropFirst(6).isEmpty)
         let joining = session.plans[5]
         XCTAssertEqual(joining.outgoingTrackID, blend.trackIDs.last)
         XCTAssertEqual(joining.style, .bassSwap)
@@ -255,6 +262,11 @@ final class StarterBlendProductionPathTests: XCTestCase {
             from: BlendCatalogTrack.key(pack: .v1, trackID: joining.outgoingTrackID),
             to: BlendCatalogTrack.key(pack: .v1, trackID: joining.incomingTrackID))
         XCTAssertEqual(stored, joining, "the derived plan is persisted with the catalog")
+        let incoming = try await LibraryStore.shared.blendCatalogTrack(
+            key: BlendCatalogTrack.key(pack: .v1, trackID: joining.incomingTrackID))
+        XCTAssertEqual(incoming?.state, .edgePlanned, "state advances only once the edge is planned")
+        // Replay: a fresh session request built from the persisted plan is executable.
+        XCTAssertTrue(try XCTUnwrap(player.starterSession).isExecutable)
         for row in player.queue.dropFirst(6) { XCTAssertTrue(StarterBlendPack.v1.owns(URL(string: row.asset?.remoteURL ?? "")!)) }
     }
 

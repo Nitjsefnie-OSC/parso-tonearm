@@ -172,8 +172,9 @@ extension AudioPlayer {
         let pack = session.pack
         let catalog = (try? await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible, packTag: pack.releaseTag)) ?? []
         guard !Task.isCancelled else { return }
-        // Only rows with every required fact (tempo grid, genre, valid key) are ever considered.
-        let selectable = catalog.filter(\.isSelectable)
+        // Only rows with every required fact (tempo grid, genre, valid key) and a resolvable mirrored
+        // locator are ever considered. Camelot rule: same code, ±1 same mode, or relative major/minor.
+        let selectable = catalog.filter { $0.isKeepPlayingCandidate(in: pack) }
         var facts: [String: StarterTrackFacts] = [:]
         var traits: [String: BlendTraits] = [:]
         for row in selectable { facts[row.trackID] = row.facts; traits[row.trackID] = row.traits }
@@ -206,9 +207,15 @@ extension AudioPlayer {
         }
         var previous = session.trackIDs.last ?? ""
         for (id, plan) in zip(chain, plans) {
-            try? await LibraryStore.shared.recordBlendEdgePlan(
-                plan, from: BlendCatalogTrack.key(pack: pack, trackID: previous),
-                to: BlendCatalogTrack.key(pack: pack, trackID: id), packTag: pack.releaseTag)
+            // An edge that cannot be persisted is not a real plan: stop here and extend nothing.
+            do {
+                try await LibraryStore.shared.recordBlendEdgePlan(
+                    plan, from: BlendCatalogTrack.key(pack: pack, trackID: previous),
+                    to: BlendCatalogTrack.key(pack: pack, trackID: id), packTag: pack.releaseTag)
+            } catch {
+                finishKeepPlayingExtension(with: [], isFallback: true, reason: .unavailable)
+                return
+            }
             previous = id
         }
         let rows = StarterBlendPlayback.rows(blendID: session.blendID, title: "Keep Playing", trackIDs: chain, pack: pack)

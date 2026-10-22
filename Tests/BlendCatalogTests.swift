@@ -53,6 +53,41 @@ final class BlendCatalogTests: XCTestCase {
         XCTAssertFalse(legacy.isSelectable)
     }
 
+    func testKeepPlayingCandidateRequiresEligibilityFactsTraitsAndAMirroredLocator() throws {
+        let pack = StarterBlendPack.v1
+        let real = try XCTUnwrap(StarterBlendCatalog.starterTrackIDs.sorted().first)
+        let url = try XCTUnwrap(pack.assetURL(trackID: real)).absoluteString
+        func make(_ id: String, state: BlendCatalogState = .blendEligible, source: String?) -> BlendCatalogTrack {
+            BlendCatalogTrack(catalogKey: BlendCatalogTrack.key(pack: pack, trackID: id), packTag: pack.releaseTag,
+                              state: state, durationSeconds: 240, bpm: 100, beatPeriod: 0.6, beatPhase: 0.2, rmsDB: -12,
+                              updatedAt: Date(), genre: "Electronic", subgenre: "Synthwave", camelotKey: "8A",
+                              sourceURL: source)
+        }
+        // Seeded and unindexed: never a candidate, even though the catalog gave it a key and a source.
+        XCTAssertFalse(make(real, state: .unindexed, source: url).isKeepPlayingCandidate(in: pack))
+        let row = make(real, source: url)
+        XCTAssertTrue(row.isKeepPlayingCandidate(in: pack))
+        XCTAssertEqual(row.resolvedLocator(in: pack), pack.locator(trackID: real))
+        // Each missing or invalid fact rejects.
+        var bad = row; bad.camelotKey = nil; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "missing key")
+        bad = row; bad.camelotKey = "13A"; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "invalid key")
+        bad = row; bad.genre = nil; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "missing genre")
+        bad = row; bad.beatPeriod = nil; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "incomplete planner facts")
+        bad = row; bad.sourceURL = nil; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "no source")
+        bad = row; bad.sourceURL = "https://example.test/\(real).m4a"; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "foreign source")
+        bad = row; bad.state = .unindexed; XCTAssertFalse(bad.isKeepPlayingCandidate(in: pack), "not eligible")
+        // A synthetic / unmirrored ID has no locator and no Release URL.
+        let synthetic = make("999999999", source: "https://github.com/johnarleyburns/parso-tonearm/releases/download/\(pack.releaseTag)/999999999.m4a")
+        XCTAssertTrue(synthetic.isSelectable)
+        XCTAssertNil(synthetic.resolvedLocator(in: pack))
+        XCTAssertFalse(synthetic.isKeepPlayingCandidate(in: pack))
+    }
+
+    func testCatalogPlannerRejectsBPMOutsideTolerance() {
+        XCTAssertNotNil(CatalogEdgePlanner.plan(blendID: "t", edge: 1, outgoing: facts("a", bpm: 100), incoming: facts("b", bpm: 104)))
+        XCTAssertNil(CatalogEdgePlanner.plan(blendID: "t", edge: 1, outgoing: facts("a", bpm: 100), incoming: facts("b", bpm: 130)))
+    }
+
     func testStarterSeedComesFromTheCatalogDatabase() async throws {
         let store = try LibraryStore(inMemory: true)
         let adapter = try StarterCatalogAdapter.bundled()

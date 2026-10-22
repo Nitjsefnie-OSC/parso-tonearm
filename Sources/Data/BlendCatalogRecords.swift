@@ -38,6 +38,20 @@ public struct BlendCatalogTrack: Codable, Equatable, Sendable, FetchableRecord, 
         state >= .blendEligible && (facts?.isBlendReady ?? false) && traits != nil
     }
 
+    /// The explicit source for this row: only a mirrored Starter asset of `pack` whose stored
+    /// `sourceURL` is that asset. Nil for unmirrored/synthetic IDs or a row without a stored source.
+    public func resolvedLocator(in pack: StarterBlendPack) -> AudioLocator? {
+        guard packTag == pack.releaseTag, let sourceURL, let url = URL(string: sourceURL),
+              pack.assetURL(trackID: trackID) == url else { return nil }
+        return pack.locator(trackID: trackID)
+    }
+
+    /// Whether Keep Playing may append this row: eligible state, complete planner facts, valid
+    /// genre and Camelot key, and a resolvable source. Never consults a model or the network.
+    public func isKeepPlayingCandidate(in pack: StarterBlendPack) -> Bool {
+        isSelectable && resolvedLocator(in: pack) != nil
+    }
+
     /// The stored facts, when complete.
     public var facts: StarterTrackFacts? {
         guard let durationSeconds, let bpm, let beatPeriod, let beatPhase, let rmsDB else { return nil }
