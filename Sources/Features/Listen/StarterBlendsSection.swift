@@ -21,8 +21,7 @@ private struct StarterBlendsList: View {
             VStack(spacing: 10) {
                 ForEach(StarterBlendCatalog.blends) { blend in
                     StarterBlendCard(blend: blend, state: playback.state(for: blend),
-                                     play: { Task { await playback.play(blend) } },
-                                     playSequentially: { playback.playSequentially(blend) })
+                                     play: { Task { await playback.play(blend) } })
                 }
             }
             HStack(spacing: 6) {
@@ -43,7 +42,6 @@ private struct StarterBlendCard: View {
     let blend: StarterBlend
     let state: StarterBlendPlayback.CardState
     let play: () -> Void
-    let playSequentially: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -63,20 +61,24 @@ private struct StarterBlendCard: View {
                 if case .failed(let message) = state {
                     Text(message).font(Typography.caption).foregroundStyle(Palette.danger)
                 }
-                if case .preparing(let done, let total) = state {
-                    Text("Preparing blend: \(done) of \(total) tracks ready")
-                        .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
-                }
-                if case .unprepared(let reason) = state {
+                switch state {
+                case .buffering:
+                    Text("Buffering…").font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+                case .blending:
+                    Text("Playing with blends").font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+                case .unavailable(let reason, let retryable):
                     Text(reason).font(Typography.caption).foregroundStyle(Palette.danger)
-                    Button("Play tracks in order without blends", action: playSequentially)
-                        .font(Typography.caption)
+                    Text(retryable ? "Playing in order without blends. Retry to blend again."
+                                   : "Playing in order without blends. This blend can't be streamed.")
+                        .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
                         .accessibilityIdentifier("listen.starter.sequential.\(blend.id)")
+                default:
+                    EmptyView()
                 }
             }
             Spacer(minLength: 8)
             Button(action: play) {
-                if state == .loading || isPreparing {
+                if state == .loading || state == .buffering {
                     ProgressView()
                 } else if isFailed {
                     Label("Retry", systemImage: "arrow.clockwise")
@@ -85,7 +87,7 @@ private struct StarterBlendCard: View {
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(state == .loading || isPreparing)
+            .disabled(state == .loading || state == .buffering || isPermanent)
             .accessibilityIdentifier("listen.starter.play.\(blend.id)")
         }
         .padding(12)
@@ -98,11 +100,12 @@ private struct StarterBlendCard: View {
 
     private var isFailed: Bool {
         switch state {
-        case .failed, .unprepared: true
+        case .failed, .unavailable(_, true): true
         default: false
         }
     }
-    private var isPreparing: Bool { if case .preparing = state { true } else { false } }
+    /// A permanently unavailable asset offers no retry: nothing about trying again can change it.
+    private var isPermanent: Bool { if case .unavailable(_, false) = state { true } else { false } }
     private var hint: LocalizedStringKey {
         isFailed ? "Couldn't load this blend. Double tap to retry." : "Double tap to play this blend."
     }

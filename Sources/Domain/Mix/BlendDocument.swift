@@ -50,10 +50,14 @@ public struct BlendDocument: Codable, Sendable, Equatable, Identifiable {
         public var toOccurrenceID: UUID
         /// `TransitionStyle.rawValue`; nil means "automatic / not specified".
         public var requestedStyle: String?
+        /// The concrete, immutable plan this edge executes (Starter Blends), persisted with the
+        /// blend so a replay plays exactly what was saved. Nil for edges planned at play time.
+        public var plan: StarterEdgePlan?
         public init(id: UUID = UUID(), fromOccurrenceID: UUID, toOccurrenceID: UUID,
-                    requestedStyle: String? = nil) {
+                    requestedStyle: String? = nil, plan: StarterEdgePlan? = nil) {
             self.id = id; self.fromOccurrenceID = fromOccurrenceID
             self.toOccurrenceID = toOccurrenceID; self.requestedStyle = requestedStyle
+            self.plan = plan
         }
     }
 
@@ -71,6 +75,8 @@ public struct BlendDocument: Codable, Sendable, Equatable, Identifiable {
     public var generation: Int
     public var occurrences: [Occurrence]
     public var edges: [Edge]
+    /// The immutable release this blend's audio and edge plans belong to (Starter Blends).
+    public var pack: StarterBlendPack?
 
     public init(id: UUID = UUID(), title: String, artworkReference: String? = nil,
                 origin: Origin, now: Date = Date(), occurrences: [Occurrence],

@@ -184,5 +184,79 @@ final class BoundedDeckMixerTests: XCTestCase {
             outgoing: nil, incoming: hours, system: TransitionSystemState(availableBytes: 8 << 30))
         XCTAssertFalse(decision.allowsWholeTrackMixing)
     }
+
+    // MARK: Plan-driven overlaps (Starter Blends)
+
+    func testOverlapTriggeredByOutgoingPositionStartsOnThatExactFrame() throws {
+        let m = mixer(capacity: 88_200)
+        let a = Source(seed: 0), b = Source(seed: 1)
+        m.begin(totalFrames: hours3, startFrame: 30_000)
+        var p = plan(start: 0, fade: 2_000, min: 1_000)
+        p.outgoingTriggerFrame = 50_000
+        m.schedule(p)
+        var started: Int64?
+        var rendered = 0
+        while rendered < 40_000 {
+            try m.decks[0].refill(from: a); try m.decks[1].refill(from: b)
+            _ = m.renderOffline(frames: 512); rendered += 512
+            if started == nil, case .active(_, let s) = m.overlap { started = s }
+        }
+        XCTAssertEqual(started, 20_000, "30,000 + 20,000 output frames at tempo 1 reaches source frame 50,000")
+        XCTAssertEqual(m.handoffs, 1)
+    }
+
+    func testBassSwapMovesTheLowBandAtTheSwapFrameAndHighsCrossfade() throws {
+        let rate = 44_100.0
+        let m = BoundedDeckMixer(sampleRate: rate, capacityFrames: 88_200, maxBlockFrames: 512)
+        final class Tones: DeckChunkSource {
+            let low: Double, high: Double
+            init(low: Double, high: Double) { self.low = low; self.high = high }
+            func read(startFrame: Int64, count: Int) throws -> [[Float]] {
+                let s = (0..<count).map { i -> Float in
+                    let t = Double(startFrame + Int64(i)) / 44_100
+                    return Float(0.2 * sin(2 * .pi * low * t) + 0.2 * sin(2 * .pi * high * t))
+                }
+                return [s, s]
+            }
+        }
+        let out = Tones(low: 40, high: 1_000), inc = Tones(low: 62, high: 1_800)
+        m.begin(totalFrames: hours3, startFrame: 0)
+        var p = plan(start: 22_050, fade: 220_500, min: 1_000)
+        p.style = .bassSwap
+        p.swapOffsetFrames = 110_250
+        m.schedule(p)
+        var captured: [Float] = []
+        while captured.count < 22_050 + 220_500 + 20_000 {
+            try m.decks[0].refill(from: out); try m.decks[1].refill(from: inc)
+            captured += m.renderOffline(frames: 512)[0]
+        }
+        func window(_ center: Int) -> ArraySlice<Float> { captured[(center - 4_096)..<(center + 4_096)] }
+        let start = 22_050, swap = start + 110_250
+        XCTAssertGreaterThan(goertzel(window(swap - 40_000), freq: 40), 4 * goertzel(window(swap - 40_000), freq: 62))
+        XCTAssertGreaterThan(goertzel(window(swap + 40_000), freq: 62), 4 * goertzel(window(swap + 40_000), freq: 40))
+        // Highs: outgoing dominates early, incoming late.
+        XCTAssertGreaterThan(goertzel(window(start + 20_000), freq: 1_000), 2 * goertzel(window(start + 20_000), freq: 1_800))
+        XCTAssertGreaterThan(goertzel(window(start + 200_000), freq: 1_800), 2 * goertzel(window(start + 200_000), freq: 1_000))
+        XCTAssertEqual(m.snapshot().clippedSamples, 0)
+    }
+
+    func testBlendedDeckEasesBackToNativeTempoButAnUnblendedDeckKeepsItsTempo() throws {
+        let m = mixer(capacity: 88_200)
+        let a = Source(seed: 0), b = Source(seed: 1)
+        m.begin(totalFrames: hours3, startFrame: 0)
+        var p = plan(start: 4_410, fade: 2_000, min: 1_000, tempo: 1.05)
+        p.outgoingTriggerFrame = nil
+        m.schedule(p)
+        var rendered = 0
+        while rendered < 6_000 + 44_100 * 6 {
+            try m.decks[0].refill(from: a); try m.decks[1].refill(from: b)
+            _ = m.renderOffline(frames: 512); rendered += 512
+        }
+        XCTAssertEqual(m.handoffs, 1)
+        let before = m.decks[m.main].positionFrame
+        _ = m.renderOffline(frames: 4_096)
+        let step = m.decks[m.main].positionFrame - before
+        XCTAssertEqual(Double(step), 4_096, accuracy: 8, "back to native tempo")
+    }
 }
 #endif

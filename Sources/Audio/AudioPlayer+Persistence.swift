@@ -24,12 +24,19 @@ extension AudioPlayer {
             updateNowPlaying()
             return
         }
+        if let starterStream {
+            starterStream.resume()
+            isPlaying = true
+            updateNowPlaying()
+            return
+        }
+        if restartEndedStarterSession() { return }
         seekToStartIfAtEnd()
         player.play()
         isPlaying = true
         updateNowPlaying()
     }
-    func pause() { mixDecks?.pause(); player.pause(); isPlaying = false; updateNowPlaying() }
+    func pause() { mixDecks?.pause(); starterStream?.pause(); player.pause(); isPlaying = false; updateNowPlaying() }
 
     /// Nudges output volume by `delta`, clamped to [0, 1] — the Mac
     /// Playback menu's Increase/Decrease Volume commands (native-mac-
@@ -46,6 +53,7 @@ extension AudioPlayer {
         let clamped = level.isFinite ? min(max(level, 0), 1) : 1
         outputLevel = clamped
         mixDecks?.volume = clamped
+        starterStream?.volume = clamped
         if crossfadePlayer == nil { player.volume = clamped }
     }
 

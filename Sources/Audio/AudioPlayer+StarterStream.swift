@@ -1,0 +1,331 @@
+#if !os(watchOS)
+import Foundation
+import AVFoundation
+import OSLog
+
+private let starterLog = Logger(subsystem: "guru.parso.tonearm", category: "StarterStream")
+
+/// The Starter Blend a queue was started from: what the streaming renderer needs and nothing
+/// that could be re-planned at play time.
+struct StarterSession {
+    let blendID: String
+    let pack: StarterBlendPack
+    private var trackIDsStorage: [String]
+    private var plansStorage: [StarterEdgePlan]
+    private var rowIDsStorage: [Int64?]
+    var trackIDs: [String] { trackIDsStorage }
+    var plans: [StarterEdgePlan] { plansStorage }
+    var rowIDs: [Int64?] { rowIDsStorage }
+    /// Streaming stopped (or was never possible): the rest plays in order, with no blend.
+    var sequential = false
+
+    init(_ request: StarterPlayRequest) {
+        blendID = request.blendID
+        pack = request.pack
+        trackIDsStorage = request.trackIDs
+        plansStorage = request.edgePlans
+        rowIDsStorage = request.rows.map(\.track.id)
+    }
+
+    mutating func append(trackIDs ids: [String], plans more: [StarterEdgePlan], rowIDs rows: [Int64?]) {
+        trackIDsStorage += ids; plansStorage += more; rowIDsStorage += rows
+    }
+
+    /// Every edge has a supplied plan that resolves against the tracks' facts.
+    var isExecutable: Bool {
+        guard plans.count == trackIDs.count - 1 else { return false }
+        let facts = StarterBlendPack.trackFacts
+        for (i, plan) in plans.enumerated() {
+            guard plan.outgoingTrackID == trackIDs[i], plan.incomingTrackID == trackIDs[i + 1],
+                  let o = facts[plan.outgoingTrackID], let n = facts[plan.incomingTrackID],
+                  plan.schedule(outgoing: o, incoming: n) != nil else { return false }
+        }
+        return true
+    }
+}
+
+extension AudioPlayer {
+    /// Plays a Starter Blend: the rows form the queue (Now Playing, Queue and Keep Playing see an
+    /// ordinary queue) while the audio streams from the release on the bounded Starter decks,
+    /// executing `request.edgePlans`. A request that is not blended plays the rows in order.
+    public func playStarterBlend(_ request: StarterPlayRequest) {
+        endStarterSession()
+        var session = StarterSession(request)
+        if !request.isBlended { session.sequential = true }
+        pendingStarterSession = session
+        play(tracks: request.rows, startAt: 0, source: .none)
+    }
+
+    /// Called at the top of `play(tracks:)`: a queue that is not the pending starter one ends the session.
+    func adoptPendingStarterSession() {
+        let pending = pendingStarterSession
+        pendingStarterSession = nil
+        if pending == nil { endStarterSession() }
+        starterSession = pending
+    }
+
+    /// The Starter Blend this queue was started from, while it is still the queue.
+    public var activeStarterBlendID: String? { starterSession?.blendID }
+
+    /// Shuffle (or another reorder) made the queue differ from the blend: the planned edges no longer
+    /// join adjacent tracks, so the blend stops and the queue plays in its new order, saying so.
+    func starterQueueOrderChanged() {
+        guard let session = starterSession, !session.sequential, starterStream != nil else { return }
+        let matches = queue.count >= session.trackIDs.count
+            && zip(queue, session.rowIDs).allSatisfy { $0.track.id == $1 }
+        guard !matches else { return }
+        fallBackToSequential(reason: "The queue order changed, so this blend plays without its transitions.",
+                             retryable: false, resumeSeconds: starterStream?.positionSeconds ?? currentTime,
+                             playingIndex: index)
+    }
+
+    /// Play after a Starter Blend ran out (its stream is gone, the session is not a fallback): stream the
+    /// current track again rather than asking an empty AVPlayer to play.
+    func restartEndedStarterSession() -> Bool {
+        guard let session = starterSession, !session.sequential, starterStream == nil, !isPlaying,
+              queue.indices.contains(index) else { return false }
+        loadCurrent(autoplay: true)
+        return true
+    }
+
+    func stopStarterStream() {
+        starterStream?.stop()
+        starterStream = nil
+    }
+
+    func endStarterSession() {
+        stopStarterStream()
+        if let session = starterSession { starterStatus = .stopped(blendID: session.blendID) }
+        starterSession = nil
+        pendingStarterSession = nil
+    }
+
+    /// Streams the current track (and the planned edges after it) on the Starter decks. False when
+    /// this queue is not a live starter session; the caller then plays it the ordinary way.
+    func loadCurrentOnStarterStream(row: TrackRow, autoplay: Bool) -> Bool {
+        guard let session = starterSession, !isAmbient else {
+            if starterStream != nil { stopStarterStream() }
+            return false
+        }
+        if session.sequential {
+            if starterStream != nil { stopStarterStream() }
+            return false
+        }
+        let matches = queue.count >= session.trackIDs.count
+            && zip(queue, session.rowIDs).allSatisfy { $0.track.id == $1 }
+        guard index < session.trackIDs.count, matches else {
+            endStarterSession()
+            return false
+        }
+        guard session.isExecutable else {
+            fallBackToSequential(reason: "This blend's transition plan is incomplete.", retryable: false, resumeSeconds: 0,
+                                 playingIndex: index)
+            return true
+        }
+        stopMixDecks()
+        cancelCrossfade(resetVolume: true)
+        shutdownLoaders()
+        dropPreloadedNext()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        isOutgoingTransitionTailAudible = false
+        deferredTransitionPlan = nil
+        transitionPlan = nil
+        if starterStream == nil { starterStream = makeStarterStream(session) }
+        currentTime = 0
+        duration = row.track.durationSec ?? 0
+        isPlaying = autoplay
+        starterStatus = .buffering(blendID: session.blendID)
+        recordPlannedEdges(session, from: index)
+        starterStream?.volume = outputLevel
+        starterStream?.start(at: index)
+        if !autoplay { starterStream?.pause() }
+        updateNowPlaying()
+        if autoplay, let trackId = row.track.id {
+            Task { try? await LibraryStore.shared.recordPlay(trackId: trackId) }
+        }
+        maybeExtendKeepPlayingQueue()
+        return true
+    }
+
+    private func makeStarterStream(_ session: StarterSession) -> StarterStreamPlayer {
+        let pack = session.pack
+        let override = starterSourceFactoryOverride
+        let output: StarterLiveOutput? = override == nil
+            ? StarterLiveOutput(cell: { [weak self] in self?.starterStream?.cell },
+                                sampleRate: { [weak self] in self?.starterStream?.sampleRate ?? 44_100 })
+            : nil
+        return StarterStreamPlayer(
+            config: .init(trackIDs: session.trackIDs, plans: session.plans, facts: StarterBlendPack.trackFacts),
+            host: self, output: output,
+            makeSource: override ?? { trackID, cancellation in
+                // Only the pinned release is ever read: byte ranges over HTTPS, bounded cache, no temp file.
+                let reader = ReleaseRangeReader(url: pack.assetURL(trackID: trackID))
+                cancellation.register { reader.cancel() }
+                return try ReleaseM4ADeckSource(reader: reader)
+            })
+    }
+
+    /// Keep Playing for a Starter Blend: appends blend-eligible catalog tracks that follow the last
+    /// track under the catalog's own rules, each edge planned from stored facts and persisted as
+    /// `edgePlanned`. Nothing is selected from outside the catalog, and no model runs.
+    func extendStarterSessionFromCatalog(_ session: StarterSession) async {
+        let pack = session.pack
+        let catalog = (try? await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible, packTag: pack.releaseTag)) ?? []
+        guard !Task.isCancelled else { return }
+        var facts: [String: StarterTrackFacts] = [:]
+        for row in catalog { if let f = row.facts { facts[row.trackID] = f } }
+        var candidates = catalog.map(\.trackID).filter { !session.trackIDs.contains($0) && facts[$0] != nil }
+        var chain: [String] = [], plans: [StarterEdgePlan] = []
+        var tail = session.trackIDs.last
+        while chain.count < min(keepPlayingBatchSize, 5), let tailID = tail, let outgoing = facts[tailID] {
+            let options = candidates.compactMap { id -> (String, StarterEdgePlan)? in
+                guard let incoming = facts[id],
+                      let plan = CatalogEdgePlanner.plan(blendID: session.blendID,
+                                                         edge: session.trackIDs.count + chain.count,
+                                                         outgoing: outgoing, incoming: incoming) else { return nil }
+                return (id, plan)
+            }
+            guard let best = options.min(by: { abs($0.1.tempo - 1) < abs($1.1.tempo - 1) }) else { break }
+            chain.append(best.0); plans.append(best.1)
+            candidates.removeAll { $0 == best.0 }
+            tail = best.0
+        }
+        guard !chain.isEmpty else {
+            finishKeepPlayingExtension(with: [], isFallback: true, reason: .unavailable)
+            return
+        }
+        var previous = session.trackIDs.last ?? ""
+        for (id, plan) in zip(chain, plans) {
+            try? await LibraryStore.shared.recordBlendEdgePlan(
+                plan, from: BlendCatalogTrack.key(pack: pack, trackID: previous),
+                to: BlendCatalogTrack.key(pack: pack, trackID: id), packTag: pack.releaseTag)
+            previous = id
+        }
+        let rows = StarterBlendPlayback.rows(blendID: session.blendID, title: "Keep Playing", trackIDs: chain, pack: pack)
+        guard var current = starterSession, current.blendID == session.blendID, !current.sequential else { return }
+        current.append(trackIDs: chain, plans: plans, rowIDs: rows.map(\.track.id))
+        starterSession = current
+        starterStream?.extend(trackIDs: chain, plans: plans, facts: facts)
+        finishKeepPlayingExtension(with: rows, isFallback: false, reason: nil)
+    }
+
+    /// Every edge of the loaded blend has a concrete plan, so every edge is published as planned
+    /// and ready from the start; the renderer's reports then move them through overlap and handoff.
+    private func recordPlannedEdges(_ session: StarterSession, from start: Int) {
+        for (offset, plan) in session.plans.enumerated() where offset >= start {
+            guard let key = starterEdgeKey(from: offset, to: offset + 1) else { continue }
+            let style = Self.displayStyle(plan.style)
+            transitionExecution.record(key, generation: transitionExecution.generation,
+                                       .scheduled(requested: style, planned: style, executed: style, readiness: .ready,
+                                                  reason: nil, overlapStart: nil, overlapEnd: nil, handoff: nil,
+                                                  sampleRate: 44_100))
+        }
+    }
+
+    static func displayStyle(_ style: StarterEdgePlan.Style) -> TransitionDisplayStyle {
+        switch style {
+        case .bassSwap: return .bassSwap
+        case .doubleDrop: return .doubleDrop
+        case .phraseCut: return .phraseBlend
+        }
+    }
+
+    private func starterEdgeKey(from: Int, to: Int) -> TransitionEdgeKey? {
+        guard queueOccurrences.indices.contains(from), queueOccurrences.indices.contains(to) else { return nil }
+        return TransitionEdgeKey(from: queueOccurrences[from], to: queueOccurrences[to])
+    }
+
+    /// Streaming cannot continue: say exactly why, then play from where the listener is in order
+    /// with the ordinary player. No blend is claimed for what follows.
+    func fallBackToSequential(reason: String, retryable: Bool, resumeSeconds: Double, playingIndex: Int) {
+        guard var session = starterSession else { return }
+        session.sequential = true
+        starterSession = session
+        let resume = isPlaying
+        stopStarterStream()
+        transitionExecution.cancelAll(reason: .stopped)
+        starterStatus = .sequential(blendID: session.blendID, reason: reason, retryable: retryable)
+        index = min(max(0, playingIndex), max(0, queue.count - 1))
+        loadCurrent(autoplay: resume)
+        if resumeSeconds > 1 { seek(to: resumeSeconds) }
+    }
+}
+
+extension AudioPlayer: StarterStreamHost {
+    func starterStreamBuffering(_ buffering: Bool) {
+        guard let session = starterSession else { return }
+        starterStatus = buffering ? .buffering(blendID: session.blendID) : .blending(blendID: session.blendID)
+    }
+
+    func starterStreamDidAdvance(to newIndex: Int) {
+        guard queue.indices.contains(newIndex) else { return }
+        index = newIndex
+        currentTime = 0
+        duration = queue[newIndex].track.durationSec ?? 0
+        updateNowPlaying()
+        persist(reason: .transportEvent)
+        if let trackId = queue[newIndex].track.id {
+            recordKeepPlayingHistory(trackId)
+            Task { try? await LibraryStore.shared.recordPlay(trackId: trackId) }
+        }
+        maybeExtendKeepPlayingQueue()
+    }
+
+    func starterStreamPosition(seconds: Double) {
+        guard isPlaying, abs(seconds - currentTime) >= 0.25 else { return }
+        currentTime = seconds
+        updateNowPlayingTime()
+    }
+
+    func starterStreamDidFinish() {
+        stopStarterStream()
+        if sleepAtEndOfTrack {
+            sleepAtEndOfTrack = false
+            pause()
+            return
+        }
+        if repeatMode == .one { loadCurrent(autoplay: true); return }
+        next()
+    }
+
+    func starterStreamAllowsBlend(from index: Int) -> Bool { repeatMode != .one && !sleepAtEndOfTrack }
+
+    func starterStreamDidFail(_ failure: StarterStreamFailure) {
+        starterLog.error("falling back to sequential: \(failure.message, privacy: .public) retryable=\(failure.retryable, privacy: .public)")
+        // `failure.trackIndex` may be the incoming track; what is audible is `playingIndex`.
+        let resume = failure.trackIndex == failure.playingIndex ? 0 : failure.resumeSeconds
+        fallBackToSequential(reason: failure.message, retryable: failure.retryable, resumeSeconds: resume,
+                             playingIndex: failure.playingIndex)
+    }
+
+    func starterStreamEdge(_ event: StarterEdgeEvent) {
+        switch event {
+        case let .scheduled(edge, plan, executed):
+            guard let key = starterEdgeKey(from: edge - 1, to: edge) else { return }
+            let planned = Self.displayStyle(plan.style)
+            if let executed {
+                let style = Self.displayStyle(executed)
+                transitionExecution.record(key, generation: transitionExecution.generation,
+                                           .scheduled(requested: planned, planned: planned, executed: style,
+                                                      readiness: .ready, reason: nil, overlapStart: nil,
+                                                      overlapEnd: nil, handoff: nil, sampleRate: 44_100))
+            } else {
+                // The listener moved past the planned point: this edge follows on, and says so.
+                transitionExecution.record(key, generation: transitionExecution.generation,
+                                           .scheduled(requested: planned, planned: planned, executed: .gapless,
+                                                      readiness: .ready, reason: .lateForPlannedBlend,
+                                                      overlapStart: nil, overlapEnd: nil, handoff: nil,
+                                                      sampleRate: 44_100))
+            }
+        case let .overlapBegan(edge, frame):
+            guard let key = starterEdgeKey(from: edge - 1, to: edge) else { return }
+            transitionExecution.record(key, generation: transitionExecution.generation, .overlapBegan(atFrame: frame))
+        case let .handedOff(edge, frame):
+            guard let key = starterEdgeKey(from: edge - 1, to: edge) else { return }
+            transitionExecution.record(key, generation: transitionExecution.generation, .handedOff(atFrame: frame))
+            transitionExecution.outgoingFinished(key, generation: transitionExecution.generation, atFrame: frame)
+        }
+    }
+}
+#endif

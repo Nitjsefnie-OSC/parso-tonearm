@@ -38,6 +38,7 @@ extension AudioPlayer {
         dropPreloadedNext()
         preloadNextItem()
         mixDecks?.upcomingChanged()
+        starterQueueOrderChanged()
     }
 
     public func cycleRepeatMode() {
@@ -47,6 +48,7 @@ extension AudioPlayer {
         case .one: .off
         }
         mixDecks?.upcomingChanged()
+        starterStream?.edgePolicyChanged()
     }
 
     public func toggleShuffle() {

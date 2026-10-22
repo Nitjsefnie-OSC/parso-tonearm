@@ -36,9 +36,28 @@ struct BoundedDeckSnapshot: Equatable, Sendable {
     var clippedSamples: Int
 }
 
+/// How the two decks share the overlap.
+enum BoundedOverlapStyle: Equatable, Sendable {
+    /// Equal-power crossfade of the full signal.
+    case crossfade
+    /// Highs crossfade across the overlap; the low band (below `BoundedDeckMixer.crossoverHz`)
+    /// moves from the outgoing to the incoming deck at `swapOffsetFrames`.
+    case bassSwap
+    /// Both decks full range: the incoming builds in until `swapOffsetFrames`, where its bass takes
+    /// over and the outgoing then leaves.
+    case doubleDrop
+}
+
 struct BoundedOverlapPlan: Equatable, Sendable {
-    /// Shared-clock frame at which the incoming deck should become audible.
+    /// Shared-clock frame at which the incoming deck should become audible. Ignored when
+    /// `outgoingTriggerFrame` is set.
     var startClock: Int64
+    /// When set, the overlap starts when the outgoing deck's source position reaches this frame
+    /// (so a plan stated in the outgoing track's own time is exact whatever its tempo history).
+    var outgoingTriggerFrame: Int64? = nil
+    var style: BoundedOverlapStyle = .crossfade
+    /// Frames into the overlap at which the bass swaps (`bassSwap`/`doubleDrop`).
+    var swapOffsetFrames: Int = 0
     var fadeFrames: Int
     var incomingStartFrame: Int64
     var incomingTotalFrames: Int64
@@ -66,7 +85,19 @@ final class BoundedDeckMixer {
     let prerollFrames: Int
     private let channelCount: Int
     private let scratch: UnsafeMutablePointer<Float>
+    /// Where the low band is split for a bass swap.
+    static let crossoverHz = 150.0
+    /// After a handoff the new current deck eases back to native tempo over this many seconds.
+    static let tempoEaseSeconds = 4.0
     private var tempos = [1.0, 1.0]
+    /// The deck that has just taken over from a blend and is returning to native tempo.
+    private var easing = [false, false]
+    /// [deck][channel][stage 0..3][z1, z2]: a Linkwitz-Riley (4th order) crossover per deck and channel;
+    /// stages 0-1 are the low-pass, 2-3 the high-pass (flat sum, ~24 dB/oct, so a bass swap does not leak).
+    private var filterState: UnsafeMutablePointer<Float>
+    private let lowPass: (b0: Float, b1: Float, b2: Float, a1: Float, a2: Float)
+    private let highPass: (b0: Float, b1: Float, b2: Float, a1: Float, a2: Float)
+    private var stateStride: Int { channelCount * 8 }
     private var gains: [Float] = [1, 1]
     private(set) var clock: Int64 = 0
     private(set) var main = 0
@@ -88,9 +119,36 @@ final class BoundedDeckMixer {
                  BoundedDeckBuffer(capacityFrames: capacityFrames, channelCount: channelCount)]
         scratch = .allocate(capacity: 2 * channelCount * maxBlockFrames)
         scratch.initialize(repeating: 0, count: 2 * channelCount * maxBlockFrames)
+        filterState = .allocate(capacity: 2 * channelCount * 8)
+        filterState.initialize(repeating: 0, count: 2 * channelCount * 8)
+        // RBJ biquads, Butterworth Q: two cascaded make each side Linkwitz-Riley.
+        let w0 = 2 * Double.pi * Self.crossoverHz / sampleRate
+        let alpha = sin(w0) / (2 * 0.7071067811865476), c = cos(w0), a0 = 1 + alpha
+        let a1 = Float(-2 * c / a0), a2 = Float((1 - alpha) / a0)
+        lowPass = (Float((1 - c) / 2 / a0), Float((1 - c) / a0), Float((1 - c) / 2 / a0), a1, a2)
+        highPass = (Float((1 + c) / 2 / a0), Float(-(1 + c) / a0), Float((1 + c) / 2 / a0), a1, a2)
     }
 
-    deinit { scratch.deallocate() }
+    deinit { scratch.deallocate(); filterState.deallocate() }
+
+    /// One transposed direct-form II biquad step on `z` (two floats of state).
+    @inline(__always)
+    private func biquad(_ c: (b0: Float, b1: Float, b2: Float, a1: Float, a2: Float),
+                        _ z: UnsafeMutablePointer<Float>, _ x: Float) -> Float {
+        let y = c.b0 * x + z[0]
+        z[0] = c.b1 * x - c.a1 * y + z[1]
+        z[1] = c.b2 * x - c.a2 * y
+        return y
+    }
+
+    /// Splits `x` for `deck`/`channel` into (low, high).
+    @inline(__always)
+    private func bands(deck: Int, channel: Int, _ x: Float) -> (low: Float, high: Float) {
+        let z = filterState + deck * stateStride + channel * 8
+        let low = biquad(lowPass, z + 2, biquad(lowPass, z, x))
+        let high = biquad(highPass, z + 6, biquad(highPass, z + 4, x))
+        return (low, high)
+    }
 
     // MARK: Control
 
@@ -98,6 +156,7 @@ final class BoundedDeckMixer {
     func begin(totalFrames: Int64, startFrame: Int64, tempo: Double = 1) {
         overlap = .none
         waiting = false
+        easing = [false, false]
         tempos[main] = tempo
         gains[main] = 1
         decks[main].retarget(totalFrames: totalFrames, startFrame: startFrame)
@@ -113,6 +172,7 @@ final class BoundedDeckMixer {
         decks[incomingIndex].retarget(totalFrames: plan.incomingTotalFrames, startFrame: plan.incomingStartFrame)
         tempos[incomingIndex] = plan.incomingTempo
         gains[incomingIndex] = plan.incomingGain
+        easing[incomingIndex] = false
         overlap = .pending(plan)
     }
 
@@ -139,16 +199,27 @@ final class BoundedDeckMixer {
         while done < frames {
             var n = frames - done
             if case .pending(let plan) = overlap {
-                if clock >= plan.startClock {
+                let due: Bool
+                if let trigger = plan.outgoingTriggerFrame {
+                    let position = decks[main].positionFrame
+                    due = position >= trigger
+                    if !due {                       // never step past the trigger inside one segment
+                        let ahead = Double(trigger - position) / max(tempos[main], 0.01)
+                        if ahead < Double(n) { n = max(1, Int(ahead.rounded(.up))) }
+                    }
+                } else {
+                    due = clock >= plan.startClock
+                    if !due, plan.startClock - clock < Int64(n) { n = Int(plan.startClock - clock) }
+                }
+                if due {
                     if decks[incomingIndex].bufferedFrames >= max(plan.minIncomingBufferedFrames, prerollFrames + 1) {
                         overlap = .active(plan: plan, fadeStart: clock)
+                        filterState.update(repeating: 0, count: 2 * stateStride)
                         waiting = false
                     } else {
                         waiting = true
                         stalledFrames += Int64(n)
                     }
-                } else if plan.startClock - clock < Int64(n) {
-                    n = Int(plan.startClock - clock)
                 }
             }
             renderSegment(out: out + done, outStride: frames, frames: n)
@@ -168,17 +239,50 @@ final class BoundedDeckMixer {
             _ = decks[incomingIndex].render(into: b, stride: stride, frames: n, tempo: tempos[incomingIndex],
                                             prerollFrames: prerollFrames)
         }
+        let mainGain = gains[main], incomingGain = gains[incomingIndex]
         for i in 0..<n {
-            var outGain: Float = gains[main], inGain: Float = 0
+            var highOut: Float = 1, highIn: Float = 0, lowOut: Float = 1, lowIn: Float = 0
+            var split = false
             if let fade {
-                let t = Double(clock + Int64(i) - fade.start) / Double(max(1, fade.plan.fadeFrames))
-                let x = min(max(t, 0), 1) * .pi / 2
-                outGain *= Float(cos(x))
-                inGain = Float(sin(x)) * gains[incomingIndex]
+                let plan = fade.plan
+                let elapsed = Double(clock + Int64(i) - fade.start)
+                let t = min(max(elapsed / Double(max(1, plan.fadeFrames)), 0), 1)
+                switch plan.style {
+                case .crossfade:
+                    highOut = Float(cos(t * .pi / 2)); highIn = Float(sin(t * .pi / 2))
+                    lowOut = highOut; lowIn = highIn
+                case .bassSwap, .doubleDrop:
+                    split = true
+                    let ts = min(max(Double(plan.swapOffsetFrames) / Double(max(1, plan.fadeFrames)), 0.001), 0.999)
+                    if plan.style == .bassSwap {
+                        highOut = Float(cos(t * .pi / 2)); highIn = Float(sin(t * .pi / 2))
+                    } else if t < ts {
+                        highOut = 1; highIn = Float(sin(t / ts * .pi / 2))
+                    } else {
+                        highOut = Float(cos((t - ts) / (1 - ts) * .pi / 2)); highIn = 1
+                    }
+                    // The low band changes hands inside a ~10 ms window around the swap (no click).
+                    let ramp = max(1.0, 0.010 * sampleRate)
+                    let u = min(max((elapsed - Double(plan.swapOffsetFrames)) / ramp + 0.5, 0), 1)
+                    lowIn = Float(u); lowOut = Float(1 - u)
+                }
             }
             for channel in 0..<channelCount {
-                var sample = a[channel * stride + i] * outGain
-                if fade != nil { sample += b[channel * stride + i] * inGain }
+                var sample: Float
+                let x = a[channel * stride + i]
+                if fade == nil {
+                    sample = x * mainGain
+                } else {
+                    let y = b[channel * stride + i]
+                    if split {
+                        let bandsOut = bands(deck: main, channel: channel, x)
+                        let bandsIn = bands(deck: incomingIndex, channel: channel, y)
+                        sample = (bandsOut.high * highOut + bandsOut.low * lowOut) * mainGain
+                            + (bandsIn.high * highIn + bandsIn.low * lowIn) * incomingGain
+                    } else {
+                        sample = x * highOut * mainGain + y * highIn * incomingGain
+                    }
+                }
                 if sample > 1 || sample < -1 { clippedSamples += 1; sample = min(max(sample, -1), 1) }
                 out[channel * outStride + i] = sample
             }
@@ -187,7 +291,23 @@ final class BoundedDeckMixer {
             main = incomingIndex                       // the incoming deck is now the current track
             gains[main] = fade.plan.incomingGain
             overlap = .none
+            easing[main] = true
+            handoffs += 1
         }
+        easeTempo(of: main, frames: n)
+    }
+
+    /// Number of completed handoffs (a monotonic counter the controller polls).
+    private(set) var handoffs = 0
+
+    /// A track that entered a blend at the plan's tempo returns to native speed gradually after the
+    /// handoff, so the next plan (stated in native time) meets it at 1.0 without a pitch step.
+    private func easeTempo(of deck: Int, frames n: Int) {
+        guard easing[deck] else { return }
+        if case .active = overlap { return }
+        guard abs(tempos[deck] - 1) > 1e-4 else { tempos[deck] = 1; easing[deck] = false; return }
+        let step = Double(n) / (Self.tempoEaseSeconds * sampleRate)
+        tempos[deck] += (1 - tempos[deck]) * min(1, step * 4)
     }
 
     /// Offline convenience for tests: renders and returns planar channels. Allocates.
