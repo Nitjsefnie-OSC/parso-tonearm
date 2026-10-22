@@ -214,8 +214,16 @@ final class ReleaseRangeReader: @unchecked Sendable {
             throw ReleaseRangeError.permanent("missing or malformed Content-Range")
         }
         guard parsed.first == first, parsed.last >= parsed.first, parsed.last <= requestedLast,
+              parsed.total > parsed.last,
               Int64(data.count) == parsed.last - parsed.first + 1 else {
             throw ReleaseRangeError.permanent("Content-Range does not match the request")
+        }
+        // Only the real end of the resource may be shorter than requested.
+        guard parsed.last == requestedLast || parsed.last == parsed.total - 1 else {
+            throw ReleaseRangeError.permanent("truncated partial response")
+        }
+        if let known = lock.withLock({ length }), known != parsed.total {
+            throw ReleaseRangeError.permanent("total length changed")
         }
         lock.withLock {
             length = parsed.total

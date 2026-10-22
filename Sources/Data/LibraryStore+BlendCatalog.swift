@@ -11,12 +11,20 @@ extension LibraryStore {
     /// Inserts the pack's tracks and supplied plans at their final states. Idempotent; the v35
     /// migration calls it so a fresh install already holds the catalog (no download, no model).
     static func seedStarterCatalog(_ db: Database, pack: StarterBlendPack = .v1, now: Date = Date()) throws {
+        // The release carries no key analysis, so starter rows keep `camelotKey` nil and are never
+        // admitted to *new* edges until a key is stored; their 30 supplied plans are unaffected.
+        var blendTraits: [String: (genre: String, subgenre: String)] = [:]
+        for blend in StarterBlendCatalog.blends {
+            for id in blend.trackIDs { blendTraits[id] = (blend.genre, blend.subgenre) }
+        }
         for facts in StarterBlendRuntimeData.tracks {
             let record = BlendCatalogTrack(
                 catalogKey: BlendCatalogTrack.key(pack: pack, trackID: facts.id), packTag: pack.releaseTag,
                 state: facts.isBlendReady ? .edgePlanned : .unindexed, durationSeconds: facts.durationSeconds,
                 bpm: facts.bpm, beatPeriod: facts.beatPeriod, beatPhase: facts.beatPhase, rmsDB: facts.rmsDB,
-                updatedAt: now)
+                updatedAt: now, genre: blendTraits[facts.id]?.genre, subgenre: blendTraits[facts.id]?.subgenre,
+                camelotKey: nil, sourceURL: pack.assetURL(trackID: facts.id).absoluteString,
+                analysisVersion: pack.releaseTag)
             try record.save(db)
         }
         for plan in StarterBlendRuntimeData.edges {
@@ -50,8 +58,10 @@ extension LibraryStore {
     }
 
     /// `unindexed → blendEligible`, only with complete, valid facts.
-    public func markBlendEligible(key: String, facts: StarterTrackFacts, at date: Date = Date()) throws {
-        guard facts.isBlendReady else { throw BlendCatalogError.missingFacts(key) }
+    public func markBlendEligible(key: String, facts: StarterTrackFacts, traits: BlendTraits,
+                                  sourceURL: String? = nil, analysisVersion: String? = nil,
+                                  at date: Date = Date()) throws {
+        guard facts.isBlendReady, traits.isValid else { throw BlendCatalogError.missingFacts(key) }
         try dbQueue.write { db in
             guard var row = try BlendCatalogTrack.fetchOne(db, key: key) else { throw BlendCatalogError.unknownTrack(key) }
             guard row.state.canAdvance(to: .blendEligible) else {
@@ -60,6 +70,8 @@ extension LibraryStore {
             row.state = .blendEligible
             row.durationSeconds = facts.durationSeconds; row.bpm = facts.bpm; row.beatPeriod = facts.beatPeriod
             row.beatPhase = facts.beatPhase; row.rmsDB = facts.rmsDB; row.updatedAt = date
+            row.genre = traits.genre; row.subgenre = traits.subgenre; row.camelotKey = traits.camelotKey.uppercased()
+            row.sourceURL = sourceURL ?? row.sourceURL; row.analysisVersion = analysisVersion ?? row.analysisVersion
             try row.update(db)
         }
     }

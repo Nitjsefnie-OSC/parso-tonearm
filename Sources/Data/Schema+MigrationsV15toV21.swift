@@ -380,7 +380,7 @@ extension Schema {
             migrator.registerMigration("v35") { db in
                 // Blend catalog lifecycle (unindexed → blendEligible → edgePlanned) with every fact a
                 // blend needs, plus concrete edge plans. Seeded with the pinned Starter pack's tracks and
-                // supplied plans: a few dozen rows of local data, no download and no model.
+                // supplied plans: the rows themselves are seeded by v36, once their columns exist.
                 try db.create(table: "blend_catalog_track") { t in
                     t.column("catalogKey", .text).primaryKey()
                     t.column("packTag", .text).notNull()
@@ -398,6 +398,15 @@ extension Schema {
                     t.column("packTag", .text).notNull()
                     t.column("planJSON", .blob).notNull()
                     t.primaryKey(["fromKey", "toKey"])
+                }
+            }
+        }
+        if shouldRegister("v36", upTo: target) {
+            migrator.registerMigration("v36") { db in
+                // Selection facts for new / Keep Playing edges: genre, optional subgenre, Camelot key,
+                // source identity and analysis provenance. Older rows keep NULLs and stay unselectable.
+                for column in ["genre", "subgenre", "camelotKey", "sourceURL", "analysisVersion"] {
+                    try db.alter(table: "blend_catalog_track") { $0.add(column: column, .text) }
                 }
                 try LibraryStore.seedStarterCatalog(db)
             }

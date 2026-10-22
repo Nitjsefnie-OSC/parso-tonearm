@@ -57,7 +57,7 @@ private struct StarterBlendCard: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(blend.title).font(Typography.headline)
-                Text(blend.summary).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
+                Text(blend.subtitle).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
                 if case .failed(let message) = state {
                     Text(message).font(Typography.caption).foregroundStyle(Palette.danger)
                 }
@@ -93,7 +93,7 @@ private struct StarterBlendCard: View {
         .padding(12)
         .background(Palette.ink.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(blend.title). \(blend.summary)")
+        .accessibilityLabel("\(blend.title). \(blend.subtitle)")
         .accessibilityHint(hint)
         .accessibilityAction(named: Text(isFailed ? "Retry" : "Play"), play)
     }

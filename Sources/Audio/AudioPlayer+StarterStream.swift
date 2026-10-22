@@ -173,20 +173,30 @@ extension AudioPlayer {
         let pack = session.pack
         let catalog = (try? await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible, packTag: pack.releaseTag)) ?? []
         guard !Task.isCancelled else { return }
+        // Only rows with every required fact (tempo grid, genre, valid key) are ever considered.
+        let selectable = catalog.filter(\.isSelectable)
         var facts: [String: StarterTrackFacts] = [:]
-        for row in catalog { if let f = row.facts { facts[row.trackID] = f } }
-        var candidates = catalog.map(\.trackID).filter { !session.trackIDs.contains($0) && facts[$0] != nil }
+        var traits: [String: BlendTraits] = [:]
+        for row in selectable { facts[row.trackID] = row.facts; traits[row.trackID] = row.traits }
+        var candidates = selectable.map(\.trackID).filter { !session.trackIDs.contains($0) }
         var chain: [String] = [], plans: [StarterEdgePlan] = []
         var tail = session.trackIDs.last
-        while chain.count < min(keepPlayingBatchSize, 5), let tailID = tail, let outgoing = facts[tailID] {
+        while chain.count < min(keepPlayingBatchSize, 5), let tailID = tail, let outgoing = facts[tailID],
+              let outgoingTraits = traits[tailID] {
             let options = candidates.compactMap { id -> (String, StarterEdgePlan)? in
-                guard let incoming = facts[id],
+                guard let incoming = facts[id], let incomingTraits = traits[id],
+                      outgoingTraits.isCompatible(with: incomingTraits),
                       let plan = CatalogEdgePlanner.plan(blendID: session.blendID,
                                                          edge: session.trackIDs.count + chain.count,
                                                          outgoing: outgoing, incoming: incoming) else { return nil }
                 return (id, plan)
             }
-            guard let best = options.min(by: { abs($0.1.tempo - 1) < abs($1.1.tempo - 1) }) else { break }
+            // Prefer an exact subgenre match over a broad-genre-only one, then the closest tempo.
+            guard let best = options.min(by: { lhs, rhs in
+                let l = outgoingTraits.sharesSubgenre(with: traits[lhs.0]!), r = outgoingTraits.sharesSubgenre(with: traits[rhs.0]!)
+                if l != r { return l }
+                return abs(lhs.1.tempo - 1) < abs(rhs.1.tempo - 1)
+            }) else { break }
             chain.append(best.0); plans.append(best.1)
             candidates.removeAll { $0 == best.0 }
             tail = best.0
@@ -206,7 +216,8 @@ extension AudioPlayer {
         guard var current = starterSession, current.blendID == session.blendID, !current.sequential else { return }
         current.append(trackIDs: chain, plans: plans, rowIDs: rows.map(\.track.id))
         starterSession = current
-        starterStream?.extend(trackIDs: chain, plans: plans, facts: facts)
+        starterStream?.extend(trackIDs: chain, plans: plans,
+                              facts: StarterBlendPack.trackFacts.merging(facts) { _, stored in stored })
         finishKeepPlayingExtension(with: rows, isFallback: false, reason: nil)
     }
 

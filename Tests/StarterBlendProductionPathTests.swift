@@ -197,6 +197,26 @@ final class StarterBlendProductionPathTests: XCTestCase {
     func testKeepPlayingContinuesFromBlendEligibleCatalogTracksWithoutAModel() async throws {
         let blend = StarterBlendCatalog.blends[1]            // deep-focus: catalog candidates exist after its last track
         let factory = SynthCatalog.Factory(blend)
+        // Starter rows carry no key analysis, so give the tail a key and add one stored-fact candidate.
+        let tailKey = BlendCatalogTrack.key(pack: .v1, trackID: blend.trackIDs.last!)
+        let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: "9000001")
+        let tailFacts = try XCTUnwrap(StarterBlendPack.trackFacts[blend.trackIDs.last!])
+        try await LibraryStore.shared.dbQueue.write { db in
+            var tail = try XCTUnwrap(BlendCatalogTrack.fetchOne(db, key: tailKey))
+            tail.camelotKey = "8A"; try tail.update(db)
+            try BlendCatalogTrack(catalogKey: candidateKey, packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
+                                  durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
+                                  beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
+                                  genre: blend.genre, subgenre: blend.subgenre, camelotKey: "9A").save(db)
+            // Same tempo but wrong subgenre / key: must never be chosen.
+            for (suffix, sub, key) in [("2", "Progressive House", "9A"), ("3", blend.subgenre, "3A")] {
+                try BlendCatalogTrack(catalogKey: "\(StarterBlendPack.v1.releaseTag):900000\(suffix)",
+                                      packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
+                                      durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
+                                      beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
+                                      genre: blend.genre, subgenre: sub, camelotKey: key).save(db)
+            }
+        }
         let player = try await start(blend, factory: factory)
         struct Forbidden: KeepPlayingSimilarityProviding {
             func continuationTrackIDs(after recentlyPlayed: [Int64], excluding: Set<Int64>,
@@ -216,6 +236,8 @@ final class StarterBlendProductionPathTests: XCTestCase {
         let catalogRows = try await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible)
         let eligible = Set(catalogRows.map(\.trackID))
         for id in session.trackIDs.dropFirst(6) { XCTAssertTrue(eligible.contains(id), "\(id) is blend-eligible") }
+        XCTAssertEqual(session.trackIDs.dropFirst(6).first, "9000001", "only the compatible candidate is admitted")
+        XCTAssertFalse(session.trackIDs.contains("9000002") || session.trackIDs.contains("9000003"))
         let joining = session.plans[5]
         XCTAssertEqual(joining.outgoingTrackID, blend.trackIDs.last)
         XCTAssertEqual(joining.style, .bassSwap)
