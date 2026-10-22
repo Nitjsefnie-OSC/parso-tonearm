@@ -7,8 +7,8 @@ import ParsoAudioStreaming
 final class HTTPRangeAACSourceTests: XCTestCase {
     final class RangeProtocol: URLProtocol, @unchecked Sendable {
         static let lock = NSLock()
-        static var requests: [URLRequest] = []
-        static var response: ((URLRequest) -> (Int, Data, [String: String]))?
+        nonisolated(unsafe) static var requests: [URLRequest] = []
+        nonisolated(unsafe) static var response: ((URLRequest) -> (Int, Data, [String: String]))?
 
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
