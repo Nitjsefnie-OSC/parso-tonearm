@@ -11,9 +11,21 @@ public struct StarterBlendPack: Codable, Sendable, Equatable, Hashable {
     public static let v1 = StarterBlendPack(releaseTag: "starter-blends-aac-v1", version: 1,
                                             audioFormat: "aac-lc-128k-m4a")
 
-    /// The release asset for a track: `…/releases/download/<tag>/<trackID>.m4a`.
-    public func assetURL(trackID: String) -> URL {
-        URL(string: "https://github.com/johnarleyburns/parso-tonearm/releases/download/\(releaseTag)/\(trackID).m4a")!
+    /// Whether `trackID` is one of the mirrored Starter Pack assets. Only these exist on the release.
+    public func contains(trackID: String) -> Bool {
+        StarterBlendCatalog.starterTrackIDs.contains(trackID)
+    }
+
+    /// The release asset for a mirrored Starter track: `…/releases/download/<tag>/<trackID>.m4a`.
+    /// Nil for any other catalog ID: a Starter Release URL is never built for a general catalog track.
+    public func assetURL(trackID: String) -> URL? {
+        guard contains(trackID: trackID) else { return nil }
+        return URL(string: "https://github.com/johnarleyburns/parso-tonearm/releases/download/\(releaseTag)/\(trackID).m4a")!
+    }
+
+    /// The explicit source for a Starter track (nil when it is not a mirrored asset).
+    public func locator(trackID: String) -> AudioLocator? {
+        contains(trackID: trackID) ? .starterRelease(packTag: releaseTag, assetName: "\(trackID).m4a") : nil
     }
 
     /// Whether `url` is an asset of this pack (what the Starter path is allowed to read).

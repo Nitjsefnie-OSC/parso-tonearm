@@ -158,7 +158,8 @@ extension AudioPlayer {
             host: self, output: output,
             makeSource: override ?? { trackID, cancellation in
                 // Only the pinned release is ever read: byte ranges over HTTPS, bounded cache, no temp file.
-                let reader = ReleaseRangeReader(url: pack.assetURL(trackID: trackID))
+                guard let assetURL = pack.assetURL(trackID: trackID) else { throw URLError(.unsupportedURL) }
+                let reader = ReleaseRangeReader(url: assetURL)
                 cancellation.register { reader.cancel() }
                 return try ReleaseM4ADeckSource(reader: reader)
             })

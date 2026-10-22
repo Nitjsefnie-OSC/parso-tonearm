@@ -33,6 +33,8 @@ public struct StarterBlend: Identifiable, Sendable, Equatable {
 
 public enum StarterBlendCatalog {
     public static let pack = StarterBlendPack.v1
+    /// The 36 mirrored Starter Pack track IDs (the only IDs with a Release asset).
+    public static var starterTrackIDs: Set<String> { Set(blends.flatMap(\.trackIDs)) }
     public static let creditsURL = URL(string: "https://www.jamendo.com/about")!
     public static let attribution = "Music originally from Jamendo, released as CC0 for the Starter Blends."
 

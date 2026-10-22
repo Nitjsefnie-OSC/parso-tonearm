@@ -88,14 +88,15 @@ public final class StarterBlendPlayback: ObservableObject {
                             title: title, addedAt: Date(), lastResolvedAt: nil,
                             followUpdates: false, licenseText: StarterBlendCatalog.attribution,
                             memberCapHit: false)
-        return trackIDs.enumerated().map { offset, trackID in
+        return trackIDs.enumerated().compactMap { offset, trackID in
+            guard let assetURL = pack.assetURL(trackID: trackID) else { return nil }
             let id = -(Int64(trackID) ?? Int64(offset + 1))
             let track = Track(id: id, albumId: nil, sourceId: 0, title: "\(title) \(offset + 1)",
                               trackNo: offset + 1, discNo: nil, durationSec: nil,
                               codec: "AAC", sampleRate: nil, bitDepthOrBitrate: "128 kbps",
                               sortKey: String(format: "%06d", offset + 1), genre: nil, artistId: nil)
             var asset = Asset(id: nil, trackId: id, kind: .remote, bookmark: nil, relPath: nil,
-                              remoteURL: pack.assetURL(trackID: trackID).absoluteString,
+                              remoteURL: assetURL.absoluteString,
                               altRemoteURL: nil, sizeBytes: nil, unsupportedReason: nil)
             asset.transientRemoteSupportsByteRanges = true
             return TrackRow(track: track, album: nil, source: source, asset: asset, artist: nil)

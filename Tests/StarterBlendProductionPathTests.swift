@@ -204,7 +204,10 @@ final class StarterBlendProductionPathTests: XCTestCase {
         // Seeded starter rows are unindexed (the catalog has no beat grid), so index the tail as normal indexing
         // would (grid, loudness, traits) and add one stored-fact candidate.
         let tailKey = BlendCatalogTrack.key(pack: .v1, trackID: blend.trackIDs.last!)
-        let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: "9000001")
+        // Candidates must be mirrored Starter assets (only those have a Release URL); borrow IDs from another blend.
+        let spare = StarterBlendCatalog.blends[0].trackIDs.filter { !blend.trackIDs.contains($0) }
+        XCTAssertGreaterThanOrEqual(spare.count, 3)
+        let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: spare[0])
         let tailFacts = try XCTUnwrap(StarterTestFacts.byID[blend.trackIDs.last!])
         try await LibraryStore.shared.dbQueue.write { db in
             var tail = try XCTUnwrap(BlendCatalogTrack.fetchOne(db, key: tailKey))
@@ -216,8 +219,8 @@ final class StarterBlendProductionPathTests: XCTestCase {
                                   beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
                                   genre: Self.genre, subgenre: Self.subgenre, camelotKey: "9A").save(db)
             // Same tempo but wrong subgenre / key: must never be chosen.
-            for (suffix, sub, key) in [("2", "Progressive House", "9A"), ("3", Self.subgenre, "3A")] {
-                try BlendCatalogTrack(catalogKey: "\(StarterBlendPack.v1.releaseTag):900000\(suffix)",
+            for (id, sub, key) in [(spare[1], "Progressive House", "9A"), (spare[2], Self.subgenre, "3A")] {
+                try BlendCatalogTrack(catalogKey: BlendCatalogTrack.key(pack: .v1, trackID: id),
                                       packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
                                       durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
                                       beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
@@ -243,8 +246,8 @@ final class StarterBlendProductionPathTests: XCTestCase {
         let catalogRows = try await LibraryStore.shared.blendCatalogTracks(atLeast: .blendEligible)
         let eligible = Set(catalogRows.map(\.trackID))
         for id in session.trackIDs.dropFirst(6) { XCTAssertTrue(eligible.contains(id), "\(id) is blend-eligible") }
-        XCTAssertEqual(session.trackIDs.dropFirst(6).first, "9000001", "only the compatible candidate is admitted")
-        XCTAssertFalse(session.trackIDs.contains("9000002") || session.trackIDs.contains("9000003"))
+        XCTAssertEqual(session.trackIDs.dropFirst(6).first, spare[0], "only the compatible candidate is admitted")
+        XCTAssertFalse(session.trackIDs.contains(spare[1]) || session.trackIDs.contains(spare[2]))
         let joining = session.plans[5]
         XCTAssertEqual(joining.outgoingTrackID, blend.trackIDs.last)
         XCTAssertEqual(joining.style, .bassSwap)

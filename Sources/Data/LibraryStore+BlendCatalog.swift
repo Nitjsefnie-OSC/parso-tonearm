@@ -20,6 +20,8 @@ extension LibraryStore {
         let entries = try adapter.resolve(trackIDs: StarterBlendCatalog.blends.flatMap(\.trackIDs))
         let provenance = "starter-v4:\(try adapter.contentVersion())"
         for entry in entries {
+            // Only mirrored Starter assets have a Release URL; other catalog IDs are never seeded here.
+            guard let assetURL = pack.assetURL(trackID: entry.trackID) else { continue }
             let key = BlendCatalogTrack.key(pack: pack, trackID: entry.trackID)
             var record = try BlendCatalogTrack.fetchOne(db, key: key)
                 ?? BlendCatalogTrack(catalogKey: key, packTag: pack.releaseTag, state: .unindexed, durationSeconds: nil,
@@ -30,7 +32,7 @@ extension LibraryStore {
             record.genre = entry.genre
             record.subgenre = nil
             record.camelotKey = entry.camelot
-            record.sourceURL = pack.assetURL(trackID: entry.trackID).absoluteString
+            record.sourceURL = assetURL.absoluteString
             record.analysisVersion = provenance
             record.updatedAt = now
             try record.save(db)
