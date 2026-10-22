@@ -63,8 +63,9 @@ public struct StarterEdgePlan: Codable, Sendable, Equatable {
     /// Outgoing-timeline second at which the incoming track's own time 0 plays: the incoming
     /// source position at outgoing time `T` is `(T - incomingOffsetSeconds) * tempo`.
     public var incomingOffsetSeconds: Double? = nil
-    public var outgoingCutBeat: Int? = nil
-    public var incomingStartBeat: Int? = nil
+    /// Phrase cut: outgoing source second of the cut and incoming source second it lands on.
+    public var outgoingStartSeconds: Double? = nil
+    public var incomingStartSeconds: Double? = nil
 
     /// What the renderer needs, all in source seconds of each track.
     public struct Schedule: Equatable, Sendable {
@@ -81,14 +82,14 @@ public struct StarterEdgePlan: Codable, Sendable, Equatable {
         public let incomingGain: Double
     }
 
-    /// Resolves the plan against the two tracks' facts. Nil when the plan lacks the values its
+    /// Resolves the plan from its own stored values. Nil when the plan lacks the values its
     /// style needs (a malformed plan is never silently replaced by a guess).
-    public func schedule(outgoing: StarterTrackFacts, incoming: StarterTrackFacts) -> Schedule? {
+    public func schedule() -> Schedule? {
         switch style {
         case .phraseCut:
-            guard let cut = outgoingCutBeat, let start = incomingStartBeat else { return nil }
-            return Schedule(style: style, outgoingStart: outgoing.beatTime(cut), overlapSeconds: 0,
-                            swapOffsetSeconds: nil, incomingStart: incoming.beatTime(start),
+            guard let cut = outgoingStartSeconds, let start = incomingStartSeconds else { return nil }
+            return Schedule(style: style, outgoingStart: cut, overlapSeconds: 0,
+                            swapOffsetSeconds: nil, incomingStart: start,
                             incomingTempo: tempo, incomingGain: incomingGain ?? 1)
         case .bassSwap, .doubleDrop:
             guard let start = blendStartSeconds, let end = blendEndSeconds, let swap = swapSeconds,
@@ -98,12 +99,5 @@ public struct StarterEdgePlan: Codable, Sendable, Equatable {
                             incomingStart: max(0, (start - offset) * tempo), incomingTempo: tempo,
                             incomingGain: incomingGain ?? 1)
         }
-    }
-}
-
-public extension StarterBlendPack {
-    /// Facts of every Starter track, by id.
-    static var trackFacts: [String: StarterTrackFacts] {
-        Dictionary(uniqueKeysWithValues: StarterBlendRuntimeData.tracks.map { ($0.id, $0) })
     }
 }

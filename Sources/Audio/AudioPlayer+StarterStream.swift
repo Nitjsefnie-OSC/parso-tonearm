@@ -34,11 +34,9 @@ struct StarterSession {
     /// Every edge has a supplied plan that resolves against the tracks' facts.
     var isExecutable: Bool {
         guard plans.count == trackIDs.count - 1 else { return false }
-        let facts = StarterBlendPack.trackFacts
         for (i, plan) in plans.enumerated() {
             guard plan.outgoingTrackID == trackIDs[i], plan.incomingTrackID == trackIDs[i + 1],
-                  let o = facts[plan.outgoingTrackID], let n = facts[plan.incomingTrackID],
-                  plan.schedule(outgoing: o, incoming: n) != nil else { return false }
+                  plan.schedule() != nil else { return false }
         }
         return true
     }
@@ -156,7 +154,7 @@ extension AudioPlayer {
                                 sampleRate: { [weak self] in self?.starterStream?.sampleRate ?? 44_100 })
             : nil
         return StarterStreamPlayer(
-            config: .init(trackIDs: session.trackIDs, plans: session.plans, facts: StarterBlendPack.trackFacts),
+            config: .init(trackIDs: session.trackIDs, plans: session.plans),
             host: self, output: output,
             makeSource: override ?? { trackID, cancellation in
                 // Only the pinned release is ever read: byte ranges over HTTPS, bounded cache, no temp file.
@@ -216,8 +214,7 @@ extension AudioPlayer {
         guard var current = starterSession, current.blendID == session.blendID, !current.sequential else { return }
         current.append(trackIDs: chain, plans: plans, rowIDs: rows.map(\.track.id))
         starterSession = current
-        starterStream?.extend(trackIDs: chain, plans: plans,
-                              facts: StarterBlendPack.trackFacts.merging(facts) { _, stored in stored })
+        starterStream?.extend(trackIDs: chain, plans: plans)
         finishKeepPlayingExtension(with: rows, isFallback: false, reason: nil)
     }
 

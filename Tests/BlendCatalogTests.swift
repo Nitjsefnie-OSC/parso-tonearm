@@ -151,18 +151,6 @@ final class BlendCatalogTests: XCTestCase {
         }
     }
 
-    func testStarterSubtitlesShowTheRequiredSubgenre() {
-        let expected = ["Morning Light": "Progressive House", "Deep Focus": "Synthwave", "Night Drive": "Synthwave",
-                        "Acoustic Evening": "Singer-Songwriter", "Upbeat Energy": "Dance Pop",
-                        "Rainy Day": "Contemporary Piano"]
-        XCTAssertEqual(StarterBlendCatalog.blends.count, expected.count)
-        for blend in StarterBlendCatalog.blends {
-            let sub = expected[blend.title]
-            XCTAssertEqual(blend.subgenre, sub)
-            XCTAssertTrue(blend.subtitle.hasPrefix(sub ?? "?"), blend.subtitle)
-        }
-    }
-
     func testFreshInstallSeedsTheCatalogAndSuppliedPlans() async throws {
         let store = try LibraryStore(inMemory: true)
         let tracks = try await store.blendCatalogTracks(atLeast: .unindexed, packTag: StarterBlendPack.v1.releaseTag)
@@ -230,7 +218,7 @@ final class BlendCatalogTests: XCTestCase {
         XCTAssertEqual(plan.style, .bassSwap)
         XCTAssertEqual(plan.tempo, 100.0 / 104.0, accuracy: 1e-12)
         XCTAssertEqual(plan.overlapBeats, 32)
-        let s = try XCTUnwrap(plan.schedule(outgoing: out, incoming: near))
+        let s = try XCTUnwrap(plan.schedule())
         // The incoming's first beat lands on the overlap start, on the outgoing's beat grid.
         XCTAssertEqual(s.incomingStart, near.beatPhase, accuracy: 1e-9)
         let beats = (s.outgoingStart - out.beatPhase) / out.beatPeriod

@@ -84,7 +84,6 @@ public final class StarterBlendPlayback: ObservableObject {
     }
 
     nonisolated static func rows(blendID: String, title: String, trackIDs: [String], pack: StarterBlendPack) -> [TrackRow] {
-        let facts = StarterBlendPack.trackFacts
         let source = Source(id: nil, kind: .local, iaIdentifier: blendID, originalURL: nil,
                             title: title, addedAt: Date(), lastResolvedAt: nil,
                             followUpdates: false, licenseText: StarterBlendCatalog.attribution,
@@ -92,7 +91,7 @@ public final class StarterBlendPlayback: ObservableObject {
         return trackIDs.enumerated().map { offset, trackID in
             let id = -(Int64(trackID) ?? Int64(offset + 1))
             let track = Track(id: id, albumId: nil, sourceId: 0, title: "\(title) \(offset + 1)",
-                              trackNo: offset + 1, discNo: nil, durationSec: facts[trackID]?.durationSeconds,
+                              trackNo: offset + 1, discNo: nil, durationSec: nil,
                               codec: "AAC", sampleRate: nil, bitDepthOrBitrate: "128 kbps",
                               sortKey: String(format: "%06d", offset + 1), genre: nil, artistId: nil)
             var asset = Asset(id: nil, trackId: id, kind: .remote, bookmark: nil, relPath: nil,
