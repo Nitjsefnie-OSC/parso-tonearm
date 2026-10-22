@@ -16,4 +16,4 @@
 # upload it under a new release tag (never replace bytes at a URL a build already resolves) and
 # update these rows.
 
-https://github.com/johnarleyburns/parso-tonearm/releases/download/starter-v3/starter.sqlite  35b5e22bf2b771183d30af0a6031c1d14d5cbd291271824e60dc933a95aeab75  starter.sqlite
+https://github.com/johnarleyburns/parso-tonearm/releases/download/starter-v4/starter-v4.sqlite  d4fb29589473744b606ba5ec2efeaf9e69a4ef992e0280903101f966b99d2730  starter.sqlite

@@ -8,23 +8,31 @@ public enum BlendCatalogError: Error, Equatable {
 }
 
 extension LibraryStore {
-    /// Inserts the pack's tracks and supplied plans at their final states. Idempotent; the v35
+    /// Resolves the pack's tracks from the versioned starter catalog (`starter-v4.sqlite`) and stores
+    /// catalog id, genre, duration, BPM, Camelot key and provenance for each. Idempotent; the v36
     /// migration calls it so a fresh install already holds the catalog (no download, no model).
-    static func seedStarterCatalog(_ db: Database, pack: StarterBlendPack = .v1, now: Date = Date()) throws {
-        // The release carries no key analysis, so starter rows keep `camelotKey` nil and are never
-        // admitted to *new* edges until a key is stored; their 30 supplied plans are unaffected.
-        var blendTraits: [String: (genre: String, subgenre: String)] = [:]
-        for blend in StarterBlendCatalog.blends {
-            for id in blend.trackIDs { blendTraits[id] = (blend.genre, blend.subgenre) }
-        }
-        for facts in StarterBlendRuntimeData.tracks {
-            let record = BlendCatalogTrack(
-                catalogKey: BlendCatalogTrack.key(pack: pack, trackID: facts.id), packTag: pack.releaseTag,
-                state: facts.isBlendReady ? .edgePlanned : .unindexed, durationSeconds: facts.durationSeconds,
-                bpm: facts.bpm, beatPeriod: facts.beatPeriod, beatPhase: facts.beatPhase, rmsDB: facts.rmsDB,
-                updatedAt: now, genre: blendTraits[facts.id]?.genre, subgenre: blendTraits[facts.id]?.subgenre,
-                camelotKey: nil, sourceURL: pack.assetURL(trackID: facts.id).absoluteString,
-                analysisVersion: pack.releaseTag)
+    /// Every id is validated before anything is written, so a bad catalog changes nothing. Beat grid,
+    /// phase and loudness are not in the catalog and are never invented: a new row stays `.unindexed`
+    /// until normal indexing supplies them, and an existing row keeps the state and grid it reached.
+    static func seedStarterCatalog(_ db: Database, pack: StarterBlendPack = .v1, now: Date = Date(),
+                                   catalog: StarterCatalogAdapter? = nil) throws {
+        let adapter = try catalog ?? StarterCatalogAdapter.bundled()
+        let entries = try adapter.resolve(trackIDs: StarterBlendCatalog.blends.flatMap(\.trackIDs))
+        let provenance = "starter-v4:\(try adapter.contentVersion())"
+        for entry in entries {
+            let key = BlendCatalogTrack.key(pack: pack, trackID: entry.trackID)
+            var record = try BlendCatalogTrack.fetchOne(db, key: key)
+                ?? BlendCatalogTrack(catalogKey: key, packTag: pack.releaseTag, state: .unindexed, durationSeconds: nil,
+                                     bpm: nil, beatPeriod: nil, beatPhase: nil, rmsDB: nil, updatedAt: now)
+            record.packTag = pack.releaseTag
+            record.durationSeconds = entry.durationSeconds
+            record.bpm = entry.bpm
+            record.genre = entry.genre
+            record.subgenre = nil
+            record.camelotKey = entry.camelot
+            record.sourceURL = pack.assetURL(trackID: entry.trackID).absoluteString
+            record.analysisVersion = provenance
+            record.updatedAt = now
             try record.save(db)
         }
         for plan in StarterBlendRuntimeData.edges {
