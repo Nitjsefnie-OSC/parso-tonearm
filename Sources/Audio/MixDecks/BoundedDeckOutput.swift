@@ -39,7 +39,7 @@ final class BoundedDeckOutput {
         engine.connect(node, to: engine.mainMixerNode, format: format)
     }
 
-    deinit { engine.stop() }
+    isolated deinit { engine.stop() }
 
     func start() throws {
         isRunning = true
