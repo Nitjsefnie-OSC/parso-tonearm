@@ -222,6 +222,17 @@ public final class AudioPlayer: ObservableObject {
     var crossfadePlayer: AVPlayer?
     /// Mix queues play here instead of on `player` (AudioPlayer+MixDecks.swift).
     var mixDecks: MixDeckPlayer?
+    /// Starter Blends stream on their own bounded decks (AudioPlayer+StarterStream.swift).
+    var starterStream: StarterStreamPlayer?
+    var starterSession: StarterSession?
+    var pendingStarterSession: StarterSession?
+    /// Test seam: replaces the release byte-range sources (and the audio device) with procedural ones.
+    var starterSourceFactoryOverride: StarterStreamPlayer.SourceFactory?
+    /// What the Starter path is doing now; nil outside a starter session.
+    @Published public internal(set) var starterStatus: StarterStreamStatus? {
+        didSet { if let starterStatus, starterStatus != oldValue { starterStatusHandler?(starterStatus) } }
+    }
+    public var starterStatusHandler: (@MainActor (StarterStreamStatus) -> Void)?
     var crossfadeNextTrackId: Int64?
     var crossfadeNextIndex: Int?
     var crossfadeNextLoader: CachingResourceLoader?
@@ -310,6 +321,7 @@ public final class AudioPlayer: ObservableObject {
 
     public func play(tracks: [TrackRow], startAt start: Int, source: QueueSource = .none) {
         shutdownLoopPlayer()
+        adoptPendingStarterSession()
         // Real, repeated report: "I click on a track I've played before and
         // nothing happens." Root cause found by reading loadCurrent
         // (AudioPlayer+Loading.swift): it reuses `preloadedNextItem`
@@ -434,6 +446,13 @@ public final class AudioPlayer: ObservableObject {
             updateNowPlaying()
             return
         }
+        if let starterStream {
+            if isPlaying { starterStream.pause() } else { starterStream.resume() }
+            isPlaying.toggle()
+            updateNowPlaying()
+            return
+        }
+        if restartEndedStarterSession() { return }
         if isPlaying {
             player.pause()
         } else {
@@ -500,6 +519,7 @@ public final class AudioPlayer: ObservableObject {
             sleepAtEndOfTrack = false
         }
         mixDecks?.upcomingChanged()
+        starterStream?.edgePolicyChanged()
     }
 
     public func next() {
@@ -507,7 +527,7 @@ public final class AudioPlayer: ObservableObject {
         guard !queue.isEmpty else { return }
         if repeatMode == .one {
             seek(to: 0)
-            if let mixDecks { mixDecks.resume() } else { player.play() }
+            if let mixDecks { mixDecks.resume() } else if let starterStream { starterStream.resume() } else { player.play() }
             return
         }
         if index < queue.count - 1 {
@@ -528,6 +548,7 @@ public final class AudioPlayer: ObservableObject {
                 }
             }
             mixDecks?.pause()
+            starterStream?.pause()
             player.pause(); isPlaying = false; updateNowPlaying(); return
         }
         loadCurrent(autoplay: true)
@@ -552,6 +573,14 @@ public final class AudioPlayer: ObservableObject {
         guard !isAmbient else { return }
         pendingRestoreSeek = nil  // user-initiated seek cancels restore confirmation
         smartBlendFallbackToken = nil
+        if let starterStream {
+            starterStream.seek(to: seconds)
+            currentTime = seconds
+            updateNowPlayingTime()
+            persist(reason: .userSeek)
+            bridge.publishSnapshot(self)
+            return
+        }
         if let mixDecks {
             endOutgoingTransitionTail()
             mixDecks.seek(to: seconds)
@@ -591,6 +620,7 @@ public final class AudioPlayer: ObservableObject {
     }
 
     func clearQueuePlayback() {
+        endStarterSession()
         stopMixDecks()
         cancelCrossfade(resetVolume: true)
         shutdownLoaders()

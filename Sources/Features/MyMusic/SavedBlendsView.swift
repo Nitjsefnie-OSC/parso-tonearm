@@ -84,13 +84,14 @@ struct BlendDetailView: View {
                     ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.row?.track.title ?? entry.occurrence.source.title)
-                            if let status = Self.statusLabel(entry.status) {
+                            if blend.pack == nil, let status = Self.statusLabel(entry.status) {
                                 Text(status).font(Typography.caption).foregroundStyle(.red)
                                 Button("Remove from blend", role: .destructive) { remove(entry) }
                                     .font(Typography.caption)
                             }
                             if index < blend.edges.count {
-                                Text(blend.edges[index].requestedStyle.map { "→ \($0)" } ?? "→ Smart blend")
+                                Text(blend.edges[index].plan.map { "→ \($0.style.rawValue)" }
+                                     ?? blend.edges[index].requestedStyle.map { "→ \($0)" } ?? "→ Smart blend")
                                     .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
                             }
                         }
@@ -117,6 +118,13 @@ struct BlendDetailView: View {
     }
 
     private func play() {
+        if let request = BlendReplay.starterRequest(for: blend) {
+            message = nil
+            player.playStarterBlend(request)
+            let id = blend.id
+            Task { try? await appState.blendRepository.markPlayed(id: id) }
+            return
+        }
         let all = entries
         let queue = BlendReplay.playableQueue(all)
         let skipped = all.count - queue.count

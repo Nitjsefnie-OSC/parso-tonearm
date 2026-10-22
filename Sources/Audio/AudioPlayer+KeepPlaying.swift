@@ -116,6 +116,12 @@ extension AudioPlayer {
         // is a process-wide singleton and this task can otherwise keep
         // running well past the session (or test) that started it.
         guard !Task.isCancelled else { return }
+        // A Starter Blend continues from the blend catalog (blend-eligible tracks, edges planned from
+        // stored facts): no sound-similarity model and no library scan.
+        if let session = starterSession, !session.sequential {
+            await extendStarterSessionFromCatalog(session)
+            return
+        }
         let excluded = currentKeepPlayingExclusions()
 
         // Keep Playing is an endless mix: continue from the last queued track under the mixing
@@ -274,7 +280,7 @@ extension AudioPlayer {
     /// the live queue and records the outcome for the UI. Recording the
     /// outcome happens even when `rows` is empty — a fallback that found
     /// nothing to add is still a real, visible result, not silence.
-    private func finishKeepPlayingExtension(
+    func finishKeepPlayingExtension(
         with rows: [TrackRow], isFallback: Bool, reason: KeepPlayingFallbackReason?
     ) {
         keepPlayingLastExtensionWasFallback = isFallback

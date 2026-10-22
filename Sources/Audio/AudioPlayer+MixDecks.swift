@@ -16,6 +16,8 @@ extension AudioPlayer: MixDeckHost {
     /// "Use for everything" is on, and auditions.
     var wantsMixDecks: Bool {
         guard !isAmbient else { return false }
+        // Starter Blends never use the resident whole-track decks, not even for their sequential fallback.
+        guard starterSession == nil else { return false }
         if plainRestoreAfterRecovery, isRestoring { return false }
         if auditionRequested || isMixQueue { return true }
         guard smartTransitionsEnabled else { return false }

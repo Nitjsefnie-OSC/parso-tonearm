@@ -49,9 +49,11 @@ struct UpNextView: View {
             var plan: MixPlan?
             if case .mix(let mixPlan) = player.queueSource { origin = .blendLab; plan = mixPlan }
             let id = appState.savedBlendIDsByQueue[signature] ?? UUID()
-            let doc = BlendReplay.document(from: rows, plan: plan,
-                                           title: rows.first?.track.title ?? String(localized: "Blend"),
-                                           origin: origin, id: id)
+            // A Starter Blend saves as itself: pack identity and every edge's concrete plan.
+            let doc = player.activeStarterBlendID.flatMap { StarterBlendCatalog.blend(id: $0)?.document }
+                ?? BlendReplay.document(from: rows, plan: plan,
+                                        title: rows.first?.track.title ?? String(localized: "Blend"),
+                                        origin: origin, id: id)
             Task {
                 do {
                     try await appState.blendRepository.save(doc)

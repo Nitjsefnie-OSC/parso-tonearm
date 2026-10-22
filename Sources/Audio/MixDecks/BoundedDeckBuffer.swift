@@ -171,6 +171,14 @@ final class BoundedDeckBuffer: @unchecked Sendable {
 
     /// Source frame the next output sample comes from.
     var positionFrame: Int64 { readFrameStore.load(ordering: .acquiring) }
+
+    /// Like `positionFrame`, but a retarget (seek, new track) counts at once instead of when the
+    /// render callback next applies it: where this deck plays from *now*, as far as the controller cares.
+    var currentFrame: Int64 {
+        let req = Self.unpack(request.load(ordering: .acquiring))
+        return readGeneration.load(ordering: .acquiring) == req.generation
+            ? readFrameStore.load(ordering: .acquiring) : req.frame
+    }
     var underrunCount: Int { underruns.load(ordering: .relaxed) }
 
     /// Decoded frames ahead of the read position under the current generation.

@@ -376,5 +376,31 @@ extension Schema {
                 try db.execute(sql: "CREATE INDEX IF NOT EXISTS track_on_genre ON track(genre)")
             }
         }
+        if shouldRegister("v35", upTo: target) {
+            migrator.registerMigration("v35") { db in
+                // Blend catalog lifecycle (unindexed → blendEligible → edgePlanned) with every fact a
+                // blend needs, plus concrete edge plans. Seeded with the pinned Starter pack's tracks and
+                // supplied plans: a few dozen rows of local data, no download and no model.
+                try db.create(table: "blend_catalog_track") { t in
+                    t.column("catalogKey", .text).primaryKey()
+                    t.column("packTag", .text).notNull()
+                    t.column("state", .text).notNull().defaults(to: "unindexed")
+                    t.column("durationSeconds", .double)
+                    t.column("bpm", .double)
+                    t.column("beatPeriod", .double)
+                    t.column("beatPhase", .double)
+                    t.column("rmsDB", .double)
+                    t.column("updatedAt", .datetime).notNull()
+                }
+                try db.create(table: "blend_catalog_edge") { t in
+                    t.column("fromKey", .text).notNull()
+                    t.column("toKey", .text).notNull()
+                    t.column("packTag", .text).notNull()
+                    t.column("planJSON", .blob).notNull()
+                    t.primaryKey(["fromKey", "toKey"])
+                }
+                try LibraryStore.seedStarterCatalog(db)
+            }
+        }
     }
 }

@@ -74,25 +74,13 @@ final class JamendoAPITests: XCTestCase {
         }
     }
 
-    func testResponseDecodesAndStarterBlendKeepsCatalogOrder() async throws {
-        let blend = StarterBlendCatalog.blends[0]
-        let ids = blend.jamendoTrackIDs
-        // Only three of the blend's tracks come back, in reverse order.
+    func testResponseDecodesInServerOrder() async throws {
+        let ids = ["10", "11", "12", "13", "14"]
+        // Only three of the requested tracks come back, in reverse order.
         let available = [ids[4], ids[2], ids[0]]
         JamendoStubProtocol.body = envelope(available)
-        let api = makeAPI()
-        let decoded = try await api.tracks(ids: ids)
+        let decoded = try await makeAPI().tracks(ids: ids)
         XCTAssertEqual(decoded.map(\.id), available)
         XCTAssertEqual(decoded.first?.audio, "https://example.test/\(ids[4]).mp3")
-
-        var started: [StarterPlayRequest] = []
-        let playback = StarterBlendPlayback(fetch: { try await api.tracks(ids: $0) },
-                                            start: { started.append($0) })
-        await playback.play(blend)
-        XCTAssertEqual(started.count, 1)
-        XCTAssertEqual(started[0].rows.map(\.track.title), [ids[0], ids[2], ids[4]].map { "T\($0)" })
-        XCTAssertEqual(started[0].occurrenceIDs,
-                       [0, 2, 4].map { blend.document.occurrences[$0].id })
-        XCTAssertEqual(playback.state(for: blend), .idle)
     }
 }

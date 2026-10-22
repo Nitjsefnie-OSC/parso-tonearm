@@ -155,24 +155,9 @@ final class AppState: ObservableObject {
     @AppStorage("didOnboard") var didOnboard = false
     /// Listen's starter-blend Play. Owned here, not by the view, so a recreated
     /// `ListenView` shares the same in-flight guard and never starts twice.
-    let starterBlends = StarterBlendPlayback(
-        fetch: { ids in
-            try await JamendoAPI(clientID: JamendoAppConfig.clientID,
-                                 baseURL: JamendoAppConfig.baseURL).tracks(ids: ids)
-        },
-        prepare: { rows, progress in
-            await BlendPreparation.prepare(
-                rows: rows,
-                gate: { row in
-                    guard row.asset?.kind == .remote else { return nil }
-                    return AudioPlayer.shared.isNetworkAvailable ? nil : .waitingForNetwork
-                },
-                blends: { _, _ in true },
-                progress: progress)
-        },
-        start: { request in
-            AudioPlayer.shared.play(tracks: request.rows, startAt: 0)
-        })
+    let starterBlends = StarterBlendPlayback(start: { request in
+        AudioPlayer.shared.playStarterBlend(request)
+    })
 
     /// "Keep Playing" (main-library queue continuation, C01–C09 CLAP reuse):
     /// on by default. Settings-level detail lives alongside `keepPlayingBatchSize`;
@@ -198,6 +183,7 @@ final class AppState: ObservableObject {
     init(store: LibraryStore = .shared) {
         self.store = store
         self.transitionPrepService = TransitionPrepService()
+        AudioPlayer.shared.starterStatusHandler = { [weak self] status in self?.starterBlends.apply(status) }
         if let saved = UserDefaults.standard.object(forKey: Self.lastTabKey) as? Int,
             let restored = AppTab(rawValue: saved)
         {

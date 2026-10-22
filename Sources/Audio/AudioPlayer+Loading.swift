@@ -53,6 +53,7 @@ extension AudioPlayer {
             return
         }
 
+        if loadCurrentOnStarterStream(row: row, autoplay: autoplay) { return }
         if wantsMixDecks, loadCurrentOnMixDecks(row: row, autoplay: autoplay) { return }
         smartBlendFallbackToken = nil
         stopMixDecks()
@@ -306,7 +307,7 @@ extension AudioPlayer {
     /// player down and rebuilding (T2.5). No-op when there is no next track, when
     /// the next item is unsupported, or when it is already preloaded.
     func preloadNextItem(allowingMixDecks: Bool = false) {
-        guard !isAmbient, repeatMode != .one, allowingMixDecks || mixDecks == nil else { return }
+        guard !isAmbient, repeatMode != .one, allowingMixDecks || (mixDecks == nil && starterStream == nil) else { return }
         guard crossfadePlayer == nil else { return }
         guard let nextIndex = upcomingQueueIndex() else { return }
         guard queue.indices.contains(nextIndex) else { return }
