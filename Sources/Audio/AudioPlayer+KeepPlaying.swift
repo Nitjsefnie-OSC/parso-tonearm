@@ -265,7 +265,8 @@ extension AudioPlayer {
             // only reached if that already failed, so the honest fallback
             // is the same "shuffle from everything" as .library/.none.
             return (try? await LibraryStore.shared.allTrackRows()) ?? []
-        case .ambient:
+        case .ambient, .starterBlend:
+            // Starter Blends only ever play their own catalog-planned tracks.
             return []
         }
     }

@@ -1,140 +1,230 @@
-import os
 import XCTest
 @testable import TonearmCore
-
-private func jt(_ id: String) -> JamendoTrack {
-        JamendoTrack(id: id, name: "T\(id)", duration: 100, artistID: nil, artistName: "A",
-                     albumName: nil, albumID: nil, licenseCcurl: nil,
-                     audio: "https://example.test/\(id).mp3", audiodownload: nil,
-                     audiodownloadAllowed: nil, albumImage: nil, musicinfo: nil)
-}
 
 @MainActor
 private final class StartLog {
     var requests: [StarterPlayRequest] = []
 }
 
+private let failureStrings = ["Fallback · Smart blend unavailable", "Not planned yet", "Smart blend unavailable"]
+
 @MainActor
 final class StarterBlendTests: XCTestCase {
 
-    func testCatalogIsDeterministicAndComplete() {
-        XCTAssertGreaterThanOrEqual(StarterBlendCatalog.blends.count, 6)
-        XCTAssertEqual(Set(StarterBlendCatalog.blends.map(\.id)).count, StarterBlendCatalog.blends.count)
+    static let expected: [(String, [String])] = [
+        ("starter.morning-light", ["337997", "1424003", "337069", "1180864", "642026", "1077690"]),
+        ("starter.deep-focus", ["455018", "117009", "971563", "1097061", "26403", "1100130"]),
+        ("starter.night-drive", ["1163782", "1828808", "1121468", "1739551", "1493402", "1560522"]),
+        ("starter.acoustic-evening", ["1229422", "398193", "1418240", "1308980", "1849464", "1212932"]),
+        ("starter.upbeat-energy", ["2053669", "2228244", "1901830", "2126638", "2133921", "1977152"]),
+        ("starter.rainy-day", ["1891078", "1891935", "1974389", "2220789", "2169489", "1960412"])
+    ]
+
+    func testCatalogHasTheSixRevisedPacksInOrder() {
+        XCTAssertEqual(StarterBlendCatalog.blends.map(\.id), Self.expected.map(\.0))
+        for (blend, expected) in zip(StarterBlendCatalog.blends, Self.expected) {
+            XCTAssertEqual(blend.trackIDs, expected.1)
+            XCTAssertEqual(Set(blend.trackIDs).count, 6, "unique tracks")
+        }
+        XCTAssertEqual(Set(StarterBlendCatalog.blends.flatMap(\.trackIDs)).count, 36)
+    }
+
+    func testManifestAndPlansAreComplete() {
+        XCTAssertEqual(StarterBlendPack.trackFacts.count, 36)
+        XCTAssertEqual(StarterBlendPack.edgePlans.count, 30)
         for blend in StarterBlendCatalog.blends {
-            XCTAssertFalse(blend.jamendoTrackIDs.isEmpty)
-            XCTAssertEqual(blend.document, blend.document)
-            XCTAssertEqual(blend.document.origin, .starter)
-            XCTAssertEqual(blend.document.occurrences.count, blend.jamendoTrackIDs.count)
-            XCTAssertEqual(blend.document.edges.map(\.requestedStyle),
-                           Array(repeating: blend.requestedStyle, count: blend.jamendoTrackIDs.count - 1))
+            let plans = blend.edgePlans
+            XCTAssertEqual(plans.count, 5, blend.id)
+            XCTAssertEqual(plans.map(\.edge), [1, 2, 3, 4, 5])
+            for (index, plan) in plans.enumerated() {
+                XCTAssertEqual(plan.outgoing, blend.trackIDs[index])
+                XCTAssertEqual(plan.incoming, blend.trackIDs[index + 1])
+                XCTAssertGreaterThan(plan.tempo, 0.5)
+                XCTAssertGreaterThan(plan.period, 0.2)
+                XCTAssertGreaterThan(plan.incomingGain, 0)
+                if plan.style == .phraseCut {
+                    XCTAssertEqual(plan.overlapBeats, 0)
+                    XCTAssertEqual(plan.swapSeconds, plan.blendStartSeconds)
+                } else {
+                    XCTAssertEqual(plan.overlapBeats, 64)
+                    // The swap is the midpoint downbeat: half the overlap after the start.
+                    XCTAssertEqual(plan.swapSeconds - plan.blendStartSeconds,
+                                   Double(plan.overlapBeats / 2) * plan.period, accuracy: 1e-6)
+                    XCTAssertEqual(plan.blendEndSeconds - plan.blendStartSeconds,
+                                   Double(plan.overlapBeats) * plan.period, accuracy: 1e-6)
+                }
+                let out = StarterBlendPack.facts(trackID: plan.outgoing)
+                XCTAssertNotNil(out)
+                XCTAssertLessThan(plan.blendStartSeconds, out?.duration ?? 0)
+            }
+        }
+        XCTAssertEqual(StarterBlendPack.edgePlans.filter { $0.style == .phraseCut }.count, 2)
+        XCTAssertEqual(StarterBlendPack.edgePlans.filter { $0.style == .doubleDrop }.count, 3)
+        XCTAssertEqual(StarterBlendPack.edgePlans.filter { $0.style == .bassSwap }.count, 25)
+    }
+
+    func testFirstPublishedPlanIsPreservedExactly() throws {
+        let plan = try XCTUnwrap(StarterBlendPack.plan(from: "337997", to: "1424003"))
+        XCTAssertEqual(plan.style, .bassSwap)
+        XCTAssertEqual(plan.tempo, 1.027062079171714)
+        XCTAssertEqual(plan.incomingGain, 1.8138238773630753)
+        XCTAssertEqual(plan.overlapBeats, 64)
+        XCTAssertEqual(plan.outgoingBeat, 270)
+        XCTAssertEqual(plan.incomingBeat, 32)
+        XCTAssertEqual(plan.blendStartSeconds, 173.87837804159568)
+        XCTAssertEqual(plan.swapSeconds, 197.24420019525732)
+        XCTAssertEqual(plan.incomingOffsetSeconds, 173.77569620595946)
+    }
+
+    func testRenderPlanRescalesToTheOutgoingDeckTempo() throws {
+        let plan = try XCTUnwrap(StarterBlendPack.plan(from: "1424003", to: "337069"))
+        let native = plan.renderPlan()
+        XCTAssertEqual(native.blendStart, plan.blendStartSeconds)
+        XCTAssertEqual(native.swapTime, plan.swapSeconds, accuracy: 1e-6)
+        let t = 1.027062079171714
+        let scaled = plan.renderPlan(outgoingTempo: t)
+        // Same musical moment in both time bases.
+        XCTAssertEqual(scaled.blendStart * t, plan.blendStartSeconds, accuracy: 1e-9)
+        XCTAssertEqual(scaled.swapTime * t, plan.swapSeconds, accuracy: 1e-6)
+        // Incoming source position at the swap is unchanged.
+        XCTAssertEqual((scaled.swapTime - scaled.incomingOffset) * scaled.tempo,
+                       (native.swapTime - native.incomingOffset) * native.tempo, accuracy: 1e-6)
+    }
+
+    func testTrackStateMachineAndSelection() {
+        XCTAssertEqual(StarterBlendPack.state(trackID: "999"), .unindexed)
+        XCTAssertFalse(BlendTrackState.unindexed.isSelectable)
+        XCTAssertLessThan(BlendTrackState.blendEligible, .edgePlanned)
+        for blend in StarterBlendCatalog.blends {
+            for id in blend.trackIDs { XCTAssertEqual(StarterBlendPack.state(trackID: id), .edgePlanned) }
+            XCTAssertEqual(blend.selectableTrackIDs, blend.trackIDs)
         }
     }
 
-    func testPlayProducesOneRequestWithOrderedOccurrences() async throws {
-        let blend = StarterBlendCatalog.blends[0]
-        let log = StartLog()
-        // Jamendo may return tracks in any order.
-        let playback = StarterBlendPlayback(
-            fetch: { ids in ids.reversed().map { jt($0) } },
-            start: { log.requests.append($0) })
-        await playback.play(blend)
-        let requests = log.requests
-        XCTAssertEqual(requests.count, 1)
-        XCTAssertEqual(requests[0].occurrenceIDs, blend.document.occurrences.map(\.id))
-        XCTAssertEqual(requests[0].rows.map(\.track.title), blend.jamendoTrackIDs.map { "T\($0)" })
+    func testDocumentCarriesPlansPackIdentityAndReplays() throws {
+        for blend in StarterBlendCatalog.blends {
+            let document = blend.document
+            XCTAssertEqual(document, blend.document, "deterministic")
+            XCTAssertEqual(document.origin, .starter)
+            XCTAssertEqual(document.pack, StarterPackIdentity(blendID: blend.id))
+            XCTAssertEqual(document.edges.compactMap(\.plan), blend.edgePlans)
+            XCTAssertEqual(document.occurrences.compactMap(StarterBlendCatalog.trackID(of:)), blend.trackIDs)
+
+            let data = try JSONEncoder().encode(document)
+            let decoded = try JSONDecoder().decode(BlendDocument.self, from: data)
+            XCTAssertEqual(decoded, document)
+            XCTAssertEqual(StarterBlendCatalog.blend(replaying: decoded)?.id, blend.id)
+        }
+        var foreign = StarterBlendCatalog.blends[0].document
+        foreign.pack = StarterPackIdentity(releaseTag: "starter-blends-aac-v2", blendID: "starter.morning-light")
+        XCTAssertNil(StarterBlendCatalog.blend(replaying: foreign))
     }
 
-    func testFailureIsCardScopedAndRetryable() async {
-        let failing = StarterBlendCatalog.blends[0], other = StarterBlendCatalog.blends[1]
-        let offline = OSAllocatedUnfairLock(initialState: true)
+    func testAssetURLsAreVersionedReleaseAssetsNeverJamendo() {
+        for id in StarterBlendCatalog.blends.flatMap(\.trackIDs) {
+            let url = StarterBlendPack.assetURL(trackID: id)
+            XCTAssertEqual(url.absoluteString,
+                           "https://github.com/johnarleyburns/parso-tonearm/releases/download/starter-blends-aac-v1/\(id).m4a")
+            XCTAssertTrue(StarterBlendPack.isReleaseAsset(url))
+            XCTAssertEqual(StarterBlendPack.trackID(ofAsset: url), id)
+        }
+        XCTAssertFalse(StarterBlendPack.isReleaseAsset(URL(string: "https://storage.jamendo.com/x/1.m4a")!))
+    }
+
+    func testFreshInstallStartsWithoutPreparationAndUsesReleaseRows() async {
+        let blend = StarterBlendCatalog.blends[0]
         let log = StartLog()
-        let playback = StarterBlendPlayback(
-            fetch: { ids in
-                if offline.withLock({ $0 }) && ids == failing.jamendoTrackIDs { throw JamendoGenreError.transport }
-                return ids.map { jt($0) }
-            },
-            start: { log.requests.append($0) })
-        await playback.play(failing)
-        guard case .failed = playback.state(for: failing) else { return XCTFail("expected failure") }
-        XCTAssertEqual(playback.state(for: other), .idle)
-        await playback.play(other)
+        let playback = StarterBlendPlayback(probe: { _ in }, start: { log.requests.append($0) })
+        await playback.play(blend)
         XCTAssertEqual(log.requests.count, 1)
-        offline.withLock { $0 = false }
-        await playback.play(failing)
-        XCTAssertEqual(playback.state(for: failing), .idle)
+        let request = log.requests[0]
+        XCTAssertTrue(request.isPrepared)
+        XCTAssertEqual(request.edgePlans, blend.edgePlans)
+        XCTAssertEqual(request.occurrenceIDs, blend.document.occurrences.map(\.id))
+        XCTAssertEqual(request.rows.compactMap { $0.asset?.remoteURL },
+                       blend.trackIDs.map { StarterBlendPack.assetURL(trackID: $0).absoluteString })
+        XCTAssertEqual(Set(request.rows.compactMap(\.track.id)).count, 6, "unique row ids")
+        XCTAssertEqual(playback.state(for: blend), .idle)
+        for row in request.rows { XCTAssertEqual(row.asset?.transientRemoteSupportsByteRanges, true) }
+    }
+
+    func testAllSixCardsStart() async {
+        let log = StartLog()
+        let playback = StarterBlendPlayback(probe: { _ in }, start: { log.requests.append($0) })
+        for blend in StarterBlendCatalog.blends { await playback.play(blend) }
+        XCTAssertEqual(log.requests.map(\.blendID), StarterBlendCatalog.blends.map(\.id))
+        XCTAssertTrue(log.requests.allSatisfy(\.isPrepared))
+    }
+
+    func testPreparedBlendNeverShowsTheFalseFallbackStrings() async {
+        let blend = StarterBlendCatalog.blends[1]
+        let log = StartLog()
+        let playback = StarterBlendPlayback(probe: { _ in }, start: { log.requests.append($0) })
+        await playback.play(blend)
+        XCTAssertEqual(playback.state(for: blend), .idle)
+        let text = ([blend.title, blend.summary] + log.requests[0].rows.map(\.track.title)
+                    + blend.document.edges.compactMap(\.requestedStyle)).joined(separator: "\n")
+        for string in failureStrings { XCTAssertFalse(text.contains(string)) }
+        XCTAssertTrue(blend.document.edges.allSatisfy { $0.plan != nil }, "every edge has a concrete plan")
+    }
+
+    func testUnavailableAssetIsRetryableAndOffersSequentialPlayback() async {
+        let blend = StarterBlendCatalog.blends[0]
+        let other = StarterBlendCatalog.blends[1]
+        let log = StartLog()
+        let outage = OutageFlag()
+        let playback = StarterBlendPlayback(
+            probe: { _ in if outage.isDown { throw RangeFetchError.retryable("HTTP 503") } },
+            start: { log.requests.append($0) })
+        await playback.play(blend)
+        guard case .unavailable(let message, let retryable) = playback.state(for: blend) else {
+            return XCTFail("expected unavailable")
+        }
+        XCTAssertTrue(retryable)
+        XCTAssertTrue(message.contains("503"))
+        for string in failureStrings { XCTAssertFalse(message.contains(string)) }
+        XCTAssertTrue(log.requests.isEmpty)
+        XCTAssertEqual(playback.state(for: other), .idle, "failure is scoped to the card")
+
+        playback.playSequentially(blend)
+        XCTAssertEqual(log.requests.count, 1)
+        XCTAssertFalse(log.requests[0].isPrepared, "sequential makes no smart-blend claim")
+        XCTAssertEqual(log.requests[0].rows.count, 6)
+
+        await playback.play(blend)
+        outage.isDown = false
+        await playback.play(blend)
         XCTAssertEqual(log.requests.count, 2)
+        XCTAssertTrue(log.requests[1].isPrepared)
+    }
+
+    func testPermanentlyMissingAssetIsNotRetryable() async {
+        let blend = StarterBlendCatalog.blends[2]
+        let playback = StarterBlendPlayback(probe: { _ in throw RangeFetchError.permanent("HTTP 404") },
+                                            start: { _ in XCTFail("must not start") })
+        await playback.play(blend)
+        guard case .unavailable(_, let retryable) = playback.state(for: blend) else { return XCTFail() }
+        XCTAssertFalse(retryable)
+        playback.playSequentially(blend)   // not offered for a permanent failure's pending request
     }
 
     func testRepeatedTapWhileInFlightStartsOnce() async {
         let blend = StarterBlendCatalog.blends[0]
         let log = StartLog()
-        let playback = StarterBlendPlayback(
-            fetch: { ids in try await Task.sleep(nanoseconds: 50_000_000); return ids.map { jt($0) } },
-            start: { log.requests.append($0) })
+        let playback = StarterBlendPlayback(probe: { _ in try await Task.sleep(nanoseconds: 50_000_000) },
+                                            start: { log.requests.append($0) })
         async let a: Void = playback.play(blend)
         async let b: Void = playback.play(blend)
         _ = await (a, b)
         XCTAssertEqual(log.requests.count, 1)
     }
+}
 
-    func testPreparedBlendStartsOnlyAfterEveryEdgeIsReady() async {
-        let blend = StarterBlendCatalog.blends[0]
-        let log = StartLog()
-        let playback = StarterBlendPlayback(
-            fetch: { ids in ids.map { jt($0) } },
-            prepare: { rows, progress in
-                XCTAssertTrue(log.requests.isEmpty, "must not play before preparation")
-                for row in rows { progress(row.track.id ?? 0, .ready) }
-            },
-            start: { log.requests.append($0) })
-        await playback.play(blend)
-        XCTAssertEqual(log.requests.count, 1)
-        XCTAssertTrue(log.requests[0].isPrepared)
-    }
-
-    func testOfflinePreparationIsVisibleAndOffersSequentialFallbackAndRetry() async {
-        let blend = StarterBlendCatalog.blends[0]
-        let log = StartLog()
-        let offline = OSAllocatedUnfairLock(initialState: true)
-        let playback = StarterBlendPlayback(
-            fetch: { ids in ids.map { jt($0) } },
-            prepare: { rows, progress in
-                for (i, row) in rows.enumerated() {
-                    if offline.withLock({ $0 }) && i == 1 { progress(row.track.id ?? 0, .waitingForNetwork); return }
-                    progress(row.track.id ?? 0, .ready)
-                }
-            },
-            start: { log.requests.append($0) })
-        await playback.play(blend)
-        guard case .unprepared(let reason) = playback.state(for: blend) else { return XCTFail("expected unprepared") }
-        XCTAssertTrue(reason.contains("offline"))
-        XCTAssertTrue(log.requests.isEmpty)
-
-        offline.withLock { $0 = false }
-        await playback.play(blend)
-        XCTAssertEqual(log.requests.count, 1)
-        XCTAssertTrue(log.requests[0].isPrepared)
-
-        offline.withLock { $0 = true }
-        await playback.play(blend)
-        playback.playSequentially(blend)
-        XCTAssertEqual(log.requests.count, 2)
-        XCTAssertFalse(log.requests[1].isPrepared)
-    }
-
-    func testInterruptedPreparationDoesNotStart() async {
-        let blend = StarterBlendCatalog.blends[0]
-        let log = StartLog()
-        let playback = StarterBlendPlayback(
-            fetch: { ids in ids.map { jt($0) } },
-            prepare: { rows, progress in
-                progress(rows[0].track.id ?? 0, .ready)
-                progress(rows[1].track.id ?? 0, .cancelled)
-            },
-            start: { log.requests.append($0) })
-        await playback.play(blend)
-        guard case .unprepared(let reason) = playback.state(for: blend) else { return XCTFail("expected unprepared") }
-        XCTAssertTrue(reason.contains("interrupted"))
-        XCTAssertTrue(log.requests.isEmpty)
+private final class OutageFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var down = true
+    var isDown: Bool {
+        get { lock.withLock { down } }
+        set { lock.withLock { down = newValue } }
     }
 }

@@ -156,22 +156,8 @@ final class AppState: ObservableObject {
     /// Listen's starter-blend Play. Owned here, not by the view, so a recreated
     /// `ListenView` shares the same in-flight guard and never starts twice.
     let starterBlends = StarterBlendPlayback(
-        fetch: { ids in
-            try await JamendoAPI(clientID: JamendoAppConfig.clientID,
-                                 baseURL: JamendoAppConfig.baseURL).tracks(ids: ids)
-        },
-        prepare: { rows, progress in
-            await BlendPreparation.prepare(
-                rows: rows,
-                gate: { row in
-                    guard row.asset?.kind == .remote else { return nil }
-                    return AudioPlayer.shared.isNetworkAvailable ? nil : .waitingForNetwork
-                },
-                blends: { _, _ in true },
-                progress: progress)
-        },
         start: { request in
-            AudioPlayer.shared.play(tracks: request.rows, startAt: 0)
+            AudioPlayer.shared.play(tracks: request.rows, startAt: 0, source: .starterBlend(request.blendID))
         })
 
     /// "Keep Playing" (main-library queue continuation, C01–C09 CLAP reuse):

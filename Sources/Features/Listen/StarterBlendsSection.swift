@@ -60,23 +60,18 @@ private struct StarterBlendCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(blend.title).font(Typography.headline)
                 Text(blend.summary).font(Typography.caption).foregroundStyle(Palette.inkSecondary)
-                if case .failed(let message) = state {
+                if case .unavailable(let message, let retryable) = state {
                     Text(message).font(Typography.caption).foregroundStyle(Palette.danger)
-                }
-                if case .preparing(let done, let total) = state {
-                    Text("Preparing blend: \(done) of \(total) tracks ready")
-                        .font(Typography.caption).foregroundStyle(Palette.inkSecondary)
-                }
-                if case .unprepared(let reason) = state {
-                    Text(reason).font(Typography.caption).foregroundStyle(Palette.danger)
-                    Button("Play tracks in order without blends", action: playSequentially)
-                        .font(Typography.caption)
-                        .accessibilityIdentifier("listen.starter.sequential.\(blend.id)")
+                    if retryable {
+                        Button("Play tracks in order without blends", action: playSequentially)
+                            .font(Typography.caption)
+                            .accessibilityIdentifier("listen.starter.sequential.\(blend.id)")
+                    }
                 }
             }
             Spacer(minLength: 8)
             Button(action: play) {
-                if state == .loading || isPreparing {
+                if state == .loading {
                     ProgressView()
                 } else if isFailed {
                     Label("Retry", systemImage: "arrow.clockwise")
@@ -85,7 +80,7 @@ private struct StarterBlendCard: View {
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(state == .loading || isPreparing)
+            .disabled(state == .loading)
             .accessibilityIdentifier("listen.starter.play.\(blend.id)")
         }
         .padding(12)
@@ -98,11 +93,10 @@ private struct StarterBlendCard: View {
 
     private var isFailed: Bool {
         switch state {
-        case .failed, .unprepared: true
+        case .unavailable: true
         default: false
         }
     }
-    private var isPreparing: Bool { if case .preparing = state { true } else { false } }
     private var hint: LocalizedStringKey {
         isFailed ? "Couldn't load this blend. Double tap to retry." : "Double tap to play this blend."
     }

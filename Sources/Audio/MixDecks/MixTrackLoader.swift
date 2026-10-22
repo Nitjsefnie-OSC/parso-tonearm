@@ -34,6 +34,8 @@ enum MixTrackLoaderError: Error, LocalizedError, Equatable {
     case unsupportedBoundedDecode(AudioContainer)
     /// Longer than the resident-PCM ceiling the mix decks accept (seconds).
     case tooLong(Int)
+    /// A Starter Blend release asset could not be read; `retryable` says whether trying again can help.
+    case releaseAssetUnavailable(String, retryable: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -44,6 +46,7 @@ enum MixTrackLoaderError: Error, LocalizedError, Equatable {
         case .fileMissing: return "The file was moved or deleted; it was not opened. Reselect or relink it"
         case .unsupportedBoundedDecode: return "This format cannot be blended; it plays without a blend"
         case .tooLong: return "The track is too long to blend; it plays without a blend"
+        case .releaseAssetUnavailable(let reason, _): return reason
         }
     }
 }
@@ -65,7 +68,10 @@ enum MixTrackLoader {
             defer { lease.release() }
             decoded = try decode(url, container: container)
         case .remote(let url, let headers, let container, let cacheKey):
-            let file = try await download(url, headers: headers, container: container, progress: progress)
+            // Starter Blend audio only ever arrives as validated byte ranges from the release.
+            let file = StarterBlendPack.isReleaseAsset(url)
+                ? try await downloadReleaseAsset(url, progress: progress)
+                : try await download(url, headers: headers, container: container, progress: progress)
             if let cacheKey, let cached = await adoptIntoCache(file, key: cacheKey) {
                 decoded = try decode(cached, container: container)
             } else {
@@ -176,6 +182,39 @@ enum MixTrackLoader {
             throw error
         }
         progress(.downloading(1))
+        return file
+    }
+
+    /// Fetches a Starter Blend release asset with `ReleaseRangeReader` (validated `206` ranges, bounded
+    /// retry, cancellation) into a temporary file; the decoder then reads it by frame range.
+    static func downloadReleaseAsset(_ url: URL, reader: ReleaseRangeReader? = nil,
+                                     progress: @escaping @Sendable (Stage) -> Void) async throws -> URL {
+        let reader = reader ?? ReleaseRangeReader(url: url, cacheBudget: 1 << 20)
+        let step = 1 << 20
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        let file = temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        do {
+            let total = try await reader.contentLength()
+            progress(.downloading(0))
+            var offset: Int64 = 0
+            while offset < total {
+                try Task.checkCancellation()
+                let data = try await reader.read(offset: offset, length: step)
+                guard !data.isEmpty else { throw RangeFetchError.invalidResponse("The release asset ended early.") }
+                try handle.write(contentsOf: data)
+                offset += Int64(data.count)
+                progress(.downloading(min(1, Double(offset) / Double(total))))
+            }
+        } catch let error as RangeFetchError {
+            try? FileManager.default.removeItem(at: file)
+            throw MixTrackLoaderError.releaseAssetUnavailable(error.message, retryable: error.isRetryable)
+        } catch {
+            try? FileManager.default.removeItem(at: file)
+            throw error
+        }
         return file
     }
 

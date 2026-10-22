@@ -52,6 +52,9 @@ public enum QueueSource {
     /// playback layer execute the same edge decisions the preview explained.
     case mix(MixPlan)
     case library
+    /// A Starter Blend (`StarterBlend.id`): range-streamed release audio. It never extends itself
+    /// from the library or Jamendo.
+    case starterBlend(String)
     case ambient
     /// A queue seeded from the Listen tab's mood entry point (docs/plans/
     /// mood-based-listening-plan.md). Carries a reference back to whatever
@@ -67,6 +70,7 @@ public enum QueueSource {
         case .playlist(let p): return String(localized: "From Playlist: \(p.title)", bundle: .module)
         case .mix: return String(localized: "From Mix", bundle: .module)
         case .library: return String(localized: "From Music", bundle: .module)
+        case .starterBlend: return "Starter Blend"
         case .ambient: return String(localized: "Ambient", bundle: .module)
         case .mood: return "A Mood"
         case .continuation: return "Jamendo"
@@ -82,6 +86,7 @@ extension QueueSource: Equatable {
         case (.playlist(let a), .playlist(let b)): return a == b
         case (.mix(let a), .mix(let b)): return a == b
         case (.library, .library): return true
+        case (.starterBlend(let a), .starterBlend(let b)): return a == b
         case (.ambient, .ambient): return true
         case (.mood(let a), .mood(let b)): return a === b
         case (.continuation(let a), .continuation(let b)): return a === b
