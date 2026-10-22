@@ -71,7 +71,7 @@ final class BlendCatalogTests: XCTestCase {
             XCTAssertTrue(StarterCatalogAdapter.bpmRange.contains(try XCTUnwrap(row.bpm)))
             XCTAssertEqual(row.camelotKey, entry.camelot)
             XCTAssertNotNil(BlendTraits.parseCamelot(try XCTUnwrap(row.camelotKey)))
-            XCTAssertEqual(row.sourceURL, StarterBlendPack.v1.assetURL(trackID: entry.trackID).absoluteString)
+            XCTAssertEqual(row.sourceURL, StarterBlendPack.v1.assetURL(trackID: entry.trackID)?.absoluteString)
             XCTAssertEqual(row.analysisVersion, "starter-v4:\(version)")
             // Beat grid and loudness are not in the catalog: never invented, so the row stays unindexed.
             XCTAssertEqual(row.state, .unindexed)

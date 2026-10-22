@@ -87,7 +87,7 @@ final class StarterBlendTests: XCTestCase {
     func testAssetsComeFromTheImmutableReleaseNeverJamendo() {
         let pack = StarterBlendCatalog.pack
         XCTAssertEqual(pack.releaseTag, "starter-blends-aac-v1")
-        XCTAssertEqual(pack.assetURL(trackID: "337997").absoluteString,
+        XCTAssertEqual(pack.assetURL(trackID: "337997")?.absoluteString,
                        "https://github.com/johnarleyburns/parso-tonearm/releases/download/starter-blends-aac-v1/337997.m4a")
         for blend in StarterBlendCatalog.blends {
             for row in StarterBlendPlayback.rows(for: blend) {
