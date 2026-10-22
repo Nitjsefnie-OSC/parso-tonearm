@@ -14,10 +14,29 @@ public struct BlendCatalogTrack: Codable, Equatable, Sendable, FetchableRecord, 
     public var beatPhase: Double?
     public var rmsDB: Double?
     public var updatedAt: Date
+    /// Selection facts (v36). Nil for rows saved before they existed: such rows are never selectable.
+    public var genre: String? = nil
+    public var subgenre: String? = nil
+    public var camelotKey: String? = nil
+    public var sourceURL: String? = nil
+    /// Provenance of the stored facts (e.g. `starter-blends-aac-v1`); nil when unknown.
+    public var analysisVersion: String? = nil
 
     public static func key(pack: StarterBlendPack, trackID: String) -> String { "\(pack.releaseTag):\(trackID)" }
 
     public var trackID: String { String(catalogKey.split(separator: ":", maxSplits: 1).last ?? "") }
+
+    /// Genre, subgenre and key, when the required ones are stored and valid.
+    public var traits: BlendTraits? {
+        guard let genre, let camelotKey else { return nil }
+        let value = BlendTraits(genre: genre, subgenre: subgenre, camelotKey: camelotKey)
+        return value.isValid ? value : nil
+    }
+
+    /// Whether a new or Keep Playing edge may use this row: eligible state and every fact valid.
+    public var isSelectable: Bool {
+        state >= .blendEligible && (facts?.isBlendReady ?? false) && traits != nil
+    }
 
     /// The stored facts, when complete.
     public var facts: StarterTrackFacts? {

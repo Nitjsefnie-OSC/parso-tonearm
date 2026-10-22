@@ -10,6 +10,9 @@ public struct StarterBlend: Identifiable, Sendable, Equatable {
     public let title: String
     /// Short mood/tempo line shown on the card.
     public let summary: String
+    /// Broad genre and the specific subgenre the pack is built around.
+    public let genre: String
+    public let subgenre: String
     /// SF Symbol and hue (0…1) drawn when no artwork is available.
     public let artworkSymbol: String
     public let artworkHue: Double
@@ -19,6 +22,9 @@ public struct StarterBlend: Identifiable, Sendable, Equatable {
     public let pack: StarterBlendPack
     /// The supplied plan for every adjacent pair, in play order (`trackIDs.count - 1` entries).
     public let edgePlans: [StarterEdgePlan]
+
+    /// The card's second line: subgenre first, then the mood/tempo summary.
+    public var subtitle: String { "\(subgenre) · \(summary)" }
 
     /// Stable, restart-safe document for this blend. Blend and occurrence UUIDs
     /// are derived from the catalog position so they never change between
@@ -52,9 +58,19 @@ public enum StarterBlendCatalog {
 
     public static func blend(id: String) -> StarterBlend? { blends.first { $0.id == id } }
 
+    private static let genres: [String: (String, String)] = [
+        "starter.morning-light": ("Electronic", "Progressive House"),
+        "starter.deep-focus": ("Electronic", "Synthwave"),
+        "starter.night-drive": ("Electronic", "Synthwave"),
+        "starter.acoustic-evening": ("Folk", "Singer-Songwriter"),
+        "starter.upbeat-energy": ("Pop", "Dance Pop"),
+        "starter.rainy-day": ("Classical", "Contemporary Piano")
+    ]
+
     private static func make(_ index: Int, _ id: String, _ title: String, _ summary: String,
                              _ symbol: String, _ hue: Double, _ tracks: [String]) -> StarterBlend {
-        StarterBlend(id: id, title: title, summary: summary, artworkSymbol: symbol, artworkHue: hue,
+        let (genre, subgenre) = genres[id] ?? ("Other", "Other")
+        return StarterBlend(id: id, title: title, summary: summary, genre: genre, subgenre: subgenre, artworkSymbol: symbol, artworkHue: hue,
                      trackIDs: tracks, pack: pack,
                      edgePlans: StarterBlendRuntimeData.edges.filter { $0.blendID == id }.sorted { $0.edge < $1.edge })
     }

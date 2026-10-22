@@ -133,6 +133,62 @@ final class ReleaseRangeReaderTests: XCTestCase {
         }
     }
 
+    func testInternallyShort206IsRejectedAndNeverCached() throws {
+        let data = blob(5_000)
+        let t = StubRangeTransport(blob: data)
+        // Nominal chunk is 1024 bytes, but the server stops 100 bytes early with a coherent header.
+        t.override = { _, range in
+            let last = range.upperBound - 100
+            return (data.subdata(in: Int(range.lowerBound)..<Int(last + 1)),
+                    t.response(status: 206, headers: ["Content-Range": "bytes \(range.lowerBound)-\(last)/5000"]))
+        }
+        let r = reader(t)
+        XCTAssertThrowsError(try r.totalLength()) {
+            XCTAssertEqual(($0 as? ReleaseRangeError)?.isRetryable, false)
+        }
+        XCTAssertEqual(t.requestRanges.count, 1, "no retry of an invalid response")
+        XCTAssertEqual(r.cachedBytes, 0)
+    }
+
+    func testFinalEOFChunkShorterThanNominalIsAccepted() throws {
+        let data = blob(2_500)                                 // chunks 1024, 1024, 452
+        let t = StubRangeTransport(blob: data)
+        let r = reader(t)
+        XCTAssertEqual(try r.read(offset: 2_000, count: 1_000), data.subdata(in: 2_000..<2_500))
+    }
+
+    func testBoundsAndTotalLengthMustAgree() {
+        let cases: [(String, Int)] = [
+            ("bytes 0-1023/1000", 1_024),     // total smaller than the last byte
+            ("bytes 0-1022/5000", 1_024),     // short and not at EOF
+            ("bytes 0-1023/5000", 1_000),     // body shorter than the range
+            ("bytes 0-1023/5000", 1_030),     // body longer than the range
+            ("bytes 0-2047/5000", 2_048)      // beyond the requested last byte
+        ]
+        for (header, bodySize) in cases {
+            let t = StubRangeTransport(blob: blob(5_000))
+            t.override = { _, _ in (Data(count: bodySize), t.response(status: 206, headers: ["Content-Range": header])) }
+            let r = reader(t)
+            XCTAssertThrowsError(try r.totalLength(), header) {
+                XCTAssertEqual(($0 as? ReleaseRangeError)?.isRetryable, false, header)
+            }
+            XCTAssertEqual(r.cachedBytes, 0, header)
+        }
+    }
+
+    func testTotalLengthChangingBetweenChunksIsRejected() throws {
+        let data = blob(5_000)
+        let t = StubRangeTransport(blob: data)
+        t.override = { call, range in
+            guard call == 2 else { return nil }
+            return (data.subdata(in: Int(range.lowerBound)..<Int(range.upperBound + 1)),
+                    t.response(status: 206, headers: ["Content-Range": "bytes \(range.lowerBound)-\(range.upperBound)/9999"]))
+        }
+        let r = reader(t)
+        _ = try r.read(offset: 0, count: 10)
+        XCTAssertThrowsError(try r.read(offset: 1_100, count: 10))
+    }
+
     func testMissingAssetIsPermanentWithoutRetry() {
         for status in [404, 410, 416, 403] {
             let t = StubRangeTransport(blob: blob(10))

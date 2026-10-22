@@ -7,6 +7,80 @@ final class BlendCatalogTests: XCTestCase {
         StarterTrackFacts(id: id, durationSeconds: 240, bpm: bpm, beatPeriod: 60 / bpm, beatPhase: 0.2, rmsDB: -12)
     }
 
+    private func traits(_ key: String, genre: String = "Electronic", sub: String? = "Synthwave") -> BlendTraits {
+        BlendTraits(genre: genre, subgenre: sub, camelotKey: key)
+    }
+
+    func testCamelotAndGenreAdmissionRules() {
+        XCTAssertTrue(BlendTraits.camelotCompatible("8A", "8A"))
+        XCTAssertTrue(BlendTraits.camelotCompatible("8A", "9A"))
+        XCTAssertTrue(BlendTraits.camelotCompatible("12A", "1A"))
+        XCTAssertTrue(BlendTraits.camelotCompatible("8A", "8B"))
+        XCTAssertFalse(BlendTraits.camelotCompatible("8A", "9B"))
+        XCTAssertFalse(BlendTraits.camelotCompatible("8A", "10A"))
+        XCTAssertFalse(BlendTraits.camelotCompatible("8A", "13A"))
+        XCTAssertFalse(BlendTraits.camelotCompatible("8A", ""))
+        let base = traits("8A")
+        XCTAssertTrue(base.isCompatible(with: traits("9A")))
+        XCTAssertTrue(base.isCompatible(with: traits("8A", sub: nil)), "one side without a subgenre falls back to genre")
+        XCTAssertFalse(base.isCompatible(with: traits("8A", sub: "Progressive House")))
+        XCTAssertFalse(base.isCompatible(with: traits("8A", genre: "Folk")))
+        XCTAssertFalse(base.isCompatible(with: traits("3A")))
+        XCTAssertFalse(base.isCompatible(with: traits("bogus")))
+        XCTAssertTrue(base.sharesSubgenre(with: traits("9A")))
+        XCTAssertFalse(base.sharesSubgenre(with: traits("9A", sub: nil)))
+    }
+
+    func testTraitsArePersistedAndGateSelection() async throws {
+        let store = try LibraryStore(inMemory: true)
+        let a = "pack:a", b = "pack:b"
+        try await store.registerBlendCatalogTrack(key: a, packTag: "pack")
+        try await store.registerBlendCatalogTrack(key: b, packTag: "pack")
+        do { try await store.markBlendEligible(key: a, facts: facts("a"), traits: traits("zz")); XCTFail() }
+        catch { XCTAssertEqual(error as? BlendCatalogError, .missingFacts(a)) }
+        try await store.markBlendEligible(key: a, facts: facts("a"), traits: traits("8a"),
+                                          sourceURL: "https://example.test/a.m4a", analysisVersion: "v1")
+        try await store.markBlendEligible(key: b, facts: facts("b"), traits: traits("3A"))
+        let rows = try await store.blendCatalogTracks(atLeast: .blendEligible, packTag: "pack")
+        let ra = try XCTUnwrap(rows.first { $0.catalogKey == a }), rb = try XCTUnwrap(rows.first { $0.catalogKey == b })
+        XCTAssertEqual(ra.traits, traits("8A"))
+        XCTAssertEqual(ra.sourceURL, "https://example.test/a.m4a")
+        XCTAssertEqual(ra.analysisVersion, "v1")
+        XCTAssertTrue(ra.isSelectable && rb.isSelectable)
+        XCTAssertFalse(ra.traits!.isCompatible(with: rb.traits!), "incompatible keys cannot pair")
+        // A legacy row (state eligible, no traits) is never selectable.
+        var legacy = ra; legacy.genre = nil; legacy.camelotKey = nil
+        XCTAssertFalse(legacy.isSelectable)
+    }
+
+    func testStarterSeedCarriesGenreSubgenreSourceAndProvenance() async throws {
+        let store = try LibraryStore(inMemory: true)
+        for blend in StarterBlendCatalog.blends {
+            for id in blend.trackIDs {
+                let found = try await store.blendCatalogTrack(key: BlendCatalogTrack.key(pack: .v1, trackID: id))
+                let row = try XCTUnwrap(found)
+                XCTAssertEqual(row.genre, blend.genre)
+                XCTAssertEqual(row.subgenre, blend.subgenre)
+                XCTAssertEqual(row.sourceURL, StarterBlendPack.v1.assetURL(trackID: id).absoluteString)
+                XCTAssertEqual(row.analysisVersion, StarterBlendPack.v1.releaseTag)
+                XCTAssertNil(row.camelotKey, "no key analysis was supplied; none is invented")
+                XCTAssertFalse(row.isSelectable, "no key → never admitted to a new edge")
+            }
+        }
+    }
+
+    func testStarterSubtitlesShowTheRequiredSubgenre() {
+        let expected = ["Morning Light": "Progressive House", "Deep Focus": "Synthwave", "Night Drive": "Synthwave",
+                        "Acoustic Evening": "Singer-Songwriter", "Upbeat Energy": "Dance Pop",
+                        "Rainy Day": "Contemporary Piano"]
+        XCTAssertEqual(StarterBlendCatalog.blends.count, expected.count)
+        for blend in StarterBlendCatalog.blends {
+            let sub = expected[blend.title]
+            XCTAssertEqual(blend.subgenre, sub)
+            XCTAssertTrue(blend.subtitle.hasPrefix(sub ?? "?"), blend.subtitle)
+        }
+    }
+
     func testFreshInstallSeedsTheCatalogAtItsFinalStates() async throws {
         let store = try LibraryStore(inMemory: true)
         let tracks = try await store.blendCatalogTracks(atLeast: .unindexed, packTag: StarterBlendPack.v1.releaseTag)
@@ -42,15 +116,15 @@ final class BlendCatalogTests: XCTestCase {
         catch { XCTAssertEqual(error as? BlendCatalogError, .illegalTransition(from: .unindexed, to: .edgePlanned)) }
         // Facts must be complete and valid.
         var bad = facts("a"); bad = StarterTrackFacts(id: "a", durationSeconds: 0, bpm: 100, beatPeriod: 0.6, beatPhase: 0, rmsDB: -10)
-        do { try await store.markBlendEligible(key: a, facts: bad); XCTFail() }
+        do { try await store.markBlendEligible(key: a, facts: bad, traits: traits("8A")); XCTFail() }
         catch { XCTAssertEqual(error as? BlendCatalogError, .missingFacts(a)) }
 
-        try await store.markBlendEligible(key: a, facts: facts("a"))
-        try await store.markBlendEligible(key: b, facts: facts("b"))
+        try await store.markBlendEligible(key: a, facts: facts("a"), traits: traits("8A"))
+        try await store.markBlendEligible(key: b, facts: facts("b"), traits: traits("9A"))
         row = try await store.blendCatalogTrack(key: a)
         XCTAssertEqual(row?.state, .blendEligible)
         XCTAssertEqual(row?.facts, facts("a"))
-        do { try await store.markBlendEligible(key: a, facts: facts("a")); XCTFail("no repeat/skip") }
+        do { try await store.markBlendEligible(key: a, facts: facts("a"), traits: traits("8A")); XCTFail("no repeat/skip") }
         catch { XCTAssertEqual(error as? BlendCatalogError, .illegalTransition(from: .blendEligible, to: .blendEligible)) }
         let eligible = try await store.blendCatalogTracks(atLeast: .blendEligible, packTag: "pack")
         XCTAssertEqual(eligible.count, 2)
@@ -62,7 +136,7 @@ final class BlendCatalogTests: XCTestCase {
         }
         let stored = try await store.blendCatalogEdgePlan(from: a, to: b)
         XCTAssertEqual(stored, plan)
-        do { try await store.markBlendEligible(key: "pack:missing", facts: facts("m")); XCTFail() }
+        do { try await store.markBlendEligible(key: "pack:missing", facts: facts("m"), traits: traits("8A")); XCTFail() }
         catch { XCTAssertEqual(error as? BlendCatalogError, .unknownTrack("pack:missing")) }
     }
 
@@ -96,6 +170,6 @@ final class BlendCatalogTests: XCTestCase {
     }
 
     func testMigrationListIncludesTheCatalog() {
-        XCTAssertEqual(Schema.migrationOrder.last, "v35")
+        XCTAssertEqual(Schema.migrationOrder.last, "v36")
     }
 }
