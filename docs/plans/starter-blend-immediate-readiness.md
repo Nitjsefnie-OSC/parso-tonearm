@@ -29,6 +29,20 @@ ranges from its immutable release asset while playing.
 - no edge is presented as planned until it has passed admission and plan
   validation.
 
+## Catalog curation rule
+
+The legacy starter IDs are not a reliable analyzed source: only one occurs in
+the current `starter-v4` source index. The replacement definitions in
+`Config/starter-blend-source.json` are selected directly from that index. Each
+blend uses one exact **subgenre** where available (rather than a broad parent
+genre), and every adjacent pair satisfies the production ±8% BPM and Camelot
+compatibility policy. `scripts/verify-starter-blend-catalog.sh` makes this
+reproducible against the pinned `source-index.json.gz` export.
+
+This is a curation-time check only. It does not require CLAP, a downloaded
+model, or any other analysis before a starter blend can begin buffering and
+playing on a fresh install.
+
 It does **not** promise zero CPU or network work. The performance target is
 audible playback after a small initial buffer (target: one second on the
 supported-network baseline), while later ranges continue to arrive. Missing,
@@ -122,7 +136,7 @@ tests but is not yet connected to `MixDeckOutput`.
    that calls `BoundedDeckMixer.render`. Preserve the existing audio-thread
    rules: fixed scratch buffers, no allocation, no locks, no URLSession, and
    no object lifecycle work in the callback.
-4. Port `MixDeckPlayer` incrementally behind a feature flag. The current track
+4. Port `MixDeckPlayer` to the bounded renderer. The current track
    begins once its initial buffer floor is met; the incoming edge is scheduled
    only when its precomputed plan exists and its required range deadline is
    feasible. The mixer keeps the outgoing deck unattenuated when the incoming
@@ -142,14 +156,51 @@ whole-file download; otherwise publish an indexed AAC-LC transport form. The
 workflow must probe a newly uploaded release asset for `Accept-Ranges: bytes`
 and a successful `206` response before recording it in a shipped manifest.
 
+### Intermittent-source and URL-refresh policy
+
+An audio URL is a short-lived transport locator, not the identity of a pack
+asset. This matters for Jamendo-style hosts, whose CDN response can be
+temporarily empty, time out, rate-limit, or invalidate a signed URL while a
+blend is queued. `HTTPRangeAACSource` therefore retains the immutable asset
+identity (release tag, expected SHA-256, expected length and frame index) and
+a resolver capable of supplying a fresh URL/headers. It never treats a retry
+URL as a different asset.
+
+1. Coalesce identical missing ranges across the two decks, then make at most
+   **four** attempts per range: immediately, then exponential backoff with
+   jitter (nominal 250 ms, 1 s, 4 s). Honour `Retry-After` for 429, but never
+   sleep past the buffer or transition deadline.
+2. Retry only transport loss/timeouts and HTTP 408, 425, 429, and 5xx. A
+   retryable response must discard its partial body; only a fully verified
+   range enters the sparse cache.
+3. On 401/403, an expired redirect/signed URL, or 416 for a URL previously
+   accepted as ranged, resolve the asset once again and retry the same missing
+   range against the fresh locator. Preserve cached bytes only when the
+   expected immutable identity still matches. A new ETag or content length is
+   diagnostic information, not authority to mix changed bytes.
+4. Do not loop on 404/410, malformed content/range headers, an unexpected
+   redirect host, a 200 full-body response to a nonzero range, decode failure,
+   index mismatch, or final hash mismatch. Those fail the edge with a concrete
+   reason. The current deck keeps playing; the mixer either delays that edge
+   only while feasible or reports the approved no-blend fallback.
+5. Give startup and the next scheduled edge a hard deadline budget. Retry only
+   while enough time remains to decode to the deck's floor; otherwise cancel
+   outstanding work and surface `source temporarily unavailable` rather than
+   letting a stale request trigger a late transition. User-initiated retry
+   creates a new generation and repeats the bounded policy from attempt zero.
+6. Record redacted attempt telemetry: stable asset identity, range, status
+   class, retry count, resolver refresh, and deadline outcome—never signed
+   URLs, query tokens, or headers. This is how a Jamendo/CDN outage is
+   distinguishable from a corrupt published pack.
+
 ### Implementation diff map
 
 | File | Change |
 | --- | --- |
 | `Sources/Audio/MixDecks/MixDeckOutput.swift` | Add a bounded-output mode whose `AVAudioSourceNode` calls `BoundedDeckMixer.render` rather than `MixRenderHandle.render`. Keep the same max-block splitting, route-change restart, offline rendering, output volume, and source-node lifetime rules. Do not call the mixer directly from the main actor; use an audio-thread mailbox for begin/seek/schedule/pause commands. |
-| `Sources/Audio/MixDecks/MixDeckPlayer.swift` | Introduce a deck source abstraction alongside the existing `MixTrackAudio`. Select bounded streaming for release-pack AAC assets, retain the existing whole-PCM engine for local/offline sources during the rollout, and gate the new path behind a feature flag. Replace direct `mix.prepare`/`mix.schedule` calls with output operations that can target either backend. Preserve `TransitionSafetyMonitor`, queue generations, delayed-edge reporting, and the no-blend escape hatch. |
-| `Sources/Audio/MixDecks/MixTrackLoader.swift` | Split current `load` into `loadResident` (unchanged compatibility path) and `openStreaming`. The latter validates manifest hash/index metadata and returns a descriptor, never a whole `PCMBuffer`. Remove the assumption that a remote source must be entirely downloaded before planning. |
-| `Sources/Audio/MixDecks/HTTPRangeAACSource.swift` (new) | Actor owning release URL, ETag/content-length validation, sparse cache, byte-range coalescing, request priorities, cancellation, and cache eviction. Expose only verified local byte windows to decoders. Reject 200 responses to range requests, wrong ETags, changed lengths, redirects to an unexpected host, and hashes that differ once a complete asset is cached. |
+| `Sources/Audio/MixDecks/MixDeckPlayer.swift` | Replace direct `mix.prepare`/`mix.schedule` calls with bounded deck operations for every source. It consumes catalog edge plans and seekable deck sources; it never constructs a whole-track `PCMBuffer`. Preserve `TransitionSafetyMonitor`, queue generations, delayed-edge reporting, and the no-blend escape hatch. |
+| `Sources/Audio/MixDecks/MixTrackLoader.swift` | Replace whole-track loading with `openStreaming`, which validates catalog/index metadata and returns a seekable descriptor, never a whole `PCMBuffer`. Remove the assumption that a remote source must be entirely downloaded before planning. |
+| `Sources/Audio/MixDecks/HTTPRangeAACSource.swift` (new) | Actor owning immutable release identity plus a refreshable transport locator, ETag/content-length validation, sparse cache, byte-range coalescing, request priorities, deadline-aware bounded retries, one-shot resolver refresh for expired/signed URLs, cancellation, and cache eviction. Expose only verified local byte windows to decoders. Reject 200 responses to nonzero range requests, malformed ranges, unexpected redirects, changed content, and hashes that differ once a complete asset is cached. |
 | `Sources/Audio/MixDecks/AACFrameIndex.swift` (new) | Decode the publisher-generated, hash-bound AAC sample/frame index. Map source frame windows to inclusive HTTP byte ranges. Validate monotonic offsets, duration, sample rate, channels, and index hash before playback. |
 | `Sources/Audio/MixDecks/StreamingDeckFeeder.swift` (new) | Run off the realtime thread. It asks a `BoundedDeckBuffer` for its next request, requests the matching bytes, decodes cached AAC frames to 44.1 kHz stereo PCM, and writes the matching generation. On a miss it schedules fetch work and writes nothing; no stale or discontinuous chunk reaches the buffer. |
 | `Sources/Audio/MixDecks/BoundedDeckMixer.swift` | Preserve its fixed memory, shared clock, incoming-buffer floor, and no-I/O/no-allocation render contract, but do **not** assume its current equal-power fade is feature-parity with `MixEngine`. Add a bounded transition renderer (or extract a reusable `ParsoMixEngine` kernel) that reproduces the approved plan’s phrase timing, crossover curve, bass swap, tempo/key-lock behavior, and delayed-edge semantics. The streaming flag cannot ship until golden-render tests prove parity for every supported transition style. |
@@ -159,7 +210,7 @@ and a successful `206` response before recording it in a shipped manifest.
 | `Sources/Domain/Mix/StarterBlendCatalog.swift` | Replace raw Jamendo IDs with the bundled pack-manifest identity. Keep stable blend and occurrence UUIDs so saves/replays stay valid across releases. |
 | `Config/starter-blend-source.json` and `scripts/publish-starter-blend-aac.sh` | Promote the generated analysis/frame index to a first-class release artifact; fail publishing unless every asset has a source review record, AAC output, stable hash, and post-upload range probe. New curated blends append here and publish under a new immutable tag. |
 | `Tests/BoundedDeckMixerTests.swift` | Preserve existing real-time/memory tests and add integration fixtures through the actual output adapter. |
-| `Tests/HTTPRangeAACSourceTests.swift`, `Tests/StreamingDeckFeederTests.swift`, `Tests/StarterBlendStreamingTests.swift` (new) | Cover HTTP 206/ETag/hash handling, frame-to-range mapping, initial-buffer start, short reads, retries, seek/reuse cancellation, late incoming audio, device-route pause/resume, and pack-backed queue routing. |
+| `Tests/HTTPRangeAACSourceTests.swift`, `Tests/StreamingDeckFeederTests.swift`, `Tests/StarterBlendStreamingTests.swift` (new) | Cover HTTP 206/ETag/hash handling, frame-to-range mapping, initial-buffer start, short reads, retry budget/backoff, 429 `Retry-After`, 5xx/timeout recovery, one-shot signed-URL refresh, no retry for corrupt/permanent responses, seek/reuse cancellation, late incoming audio, device-route pause/resume, and pack-backed queue routing. |
 | `Tests/ProductionRegression/ProductionRegressionTests.swift` | Add cold-install online regression: a fixture server serves only required ranges; every starter edge starts with a concrete plan, and neither fallback token is rendered. |
 
 ### Sequenced pull requests
@@ -168,8 +219,8 @@ and a successful `206` response before recording it in a shipped manifest.
 2. Land `HTTPRangeAACSource` plus fixture-server tests; it is not reachable from the player yet.
 3. Land `StreamingDeckFeeder` and wire it to `BoundedDeckMixer` in offline/integration tests.
 4. Add the bounded transition renderer (or extracted `ParsoMixEngine` kernel) and golden-output parity fixtures for crossfade, phrase, bass-swap, tempo, key-lock, and delayed-edge plans.
-5. Add the bounded-output adapter and feature flag; retain the resident engine as a rollback path.
-6. Route release-pack starter blends through the bounded path, add production regressions, then enable it only after device QA confirms buffer, seek, background, route-change, and delayed-edge behavior.
+5. Add the bounded-output adapter and remove the resident engine from MixDeck playback.
+6. Route every MixDeck source through the bounded path and add production regressions for buffer, seek, background, route-change, and delayed-edge behavior.
 
 ## Delivery sequence
 
