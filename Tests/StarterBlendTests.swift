@@ -24,8 +24,7 @@ final class StarterBlendTests: XCTestCase {
         let all = StarterBlendCatalog.blends.flatMap(\.trackIDs)
         XCTAssertEqual(all.count, 36)
         XCTAssertEqual(Set(all).count, 36)
-        XCTAssertEqual(StarterBlendRuntimeData.tracks.map(\.id), all)
-        XCTAssertEqual(StarterBlendRuntimeData.edges.count, 30)
+                XCTAssertEqual(StarterBlendRuntimeData.edges.count, 30)
         for blend in StarterBlendCatalog.blends {
             XCTAssertEqual(blend.pack, .v1)
             XCTAssertEqual(blend.edgePlans.count, 5, blend.id)
@@ -39,13 +38,13 @@ final class StarterBlendTests: XCTestCase {
     }
 
     func testEveryPlanResolvesAgainstItsTracksAndFitsInside() throws {
-        let facts = StarterBlendPack.trackFacts
+        let facts = StarterTestFacts.byID
         var styles: [StarterEdgePlan.Style: Int] = [:]
         for plan in StarterBlendRuntimeData.edges {
             styles[plan.style, default: 0] += 1
             let out = try XCTUnwrap(facts[plan.outgoingTrackID]), inc = try XCTUnwrap(facts[plan.incomingTrackID])
             XCTAssertTrue(out.isBlendReady && inc.isBlendReady)
-            let s = try XCTUnwrap(plan.schedule(outgoing: out, incoming: inc), "\(plan.blendID) edge \(plan.edge)")
+            let s = try XCTUnwrap(plan.schedule(), "\(plan.blendID) edge \(plan.edge)")
             XCTAssertLessThan(s.outgoingStart, out.durationSeconds)
             XCTAssertLessThanOrEqual(s.outgoingStart + s.overlapSeconds, out.durationSeconds + 0.01)
             XCTAssertLessThan(s.incomingStart, inc.durationSeconds)
@@ -70,8 +69,14 @@ final class StarterBlendTests: XCTestCase {
         XCTAssertEqual(first.incomingOffsetSeconds, 173.77569620595946)
         let cut = try XCTUnwrap(StarterBlendCatalog.blends[2].edgePlans.last)
         XCTAssertEqual(cut.style, .phraseCut)
-        XCTAssertEqual(cut.outgoingCutBeat, 32)
-        XCTAssertEqual(cut.incomingStartBeat, 0)
+        XCTAssertEqual(cut.outgoingStartSeconds, 17.481796056227534)
+        XCTAssertEqual(cut.incomingStartSeconds, 0)
+        let rainy = try XCTUnwrap(StarterBlendCatalog.blends[5].edgePlans.first)
+        XCTAssertEqual(rainy.style, .phraseCut)
+        XCTAssertEqual(rainy.schedule()?.outgoingStart, 83.738989863914227)
+        XCTAssertEqual(rainy.schedule()?.incomingStart, 0.401727281007933)
+        XCTAssertEqual(cut.schedule()?.outgoingStart, 17.481796056227534)
+        XCTAssertEqual(cut.schedule()?.incomingStart, 0)
         XCTAssertEqual(cut.overlapBeats, 0)
         let drop = StarterBlendCatalog.blends[1].edgePlans[3]
         XCTAssertEqual(drop.style, .doubleDrop)
@@ -144,5 +149,18 @@ final class StarterBlendTests: XCTestCase {
         playback.apply(.sequential(blendID: blend.id, reason: "Track 3: not found", retryable: false))
         XCTAssertEqual(playback.state(for: blend), .unavailable(reason: "Track 3: not found", retryable: false))
         XCTAssertEqual(playback.state(for: StarterBlendCatalog.blends[1]), .idle)
+    }
+
+    func testEveryPlanIsSelfContainedAndDefinitionsCarryNoTrackFacts() throws {
+        for plan in StarterBlendRuntimeData.edges {
+            XCTAssertNotNil(plan.schedule(), "\(plan.blendID) edge \(plan.edge)")
+        }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for file in ["Sources/Domain/Mix/StarterBlendRuntimeData.swift", "Sources/Domain/Mix/StarterBlendCatalog.swift"] {
+            let text = try String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
+            for banned in ["StarterTrackFacts", "trackFacts", "subgenre", "camelot", "beatPeriod", "bpm", "genres"] {
+                XCTAssertFalse(text.contains(banned), "\(file) must not contain \(banned)")
+            }
+        }
     }
 }

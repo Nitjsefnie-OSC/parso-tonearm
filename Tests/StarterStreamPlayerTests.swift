@@ -77,7 +77,7 @@ enum SynthCatalog {
     /// Even and odd tracks alternate between two bass tones well inside the crossover, so any adjacent pair is distinguishable.
     static func low(_ j: Int) -> Double { j % 2 == 0 ? 40 : 62 }
     static func high(_ j: Int) -> Double { j % 2 == 0 ? 1_000 : 1_800 }
-    static let facts = StarterBlendPack.trackFacts
+    static let facts = StarterTestFacts.byID
     /// A factory serving `SynthSource`s of the blend's real durations; keeps what it made.
     final class Factory: @unchecked Sendable {
         let blend: StarterBlend
@@ -103,7 +103,7 @@ enum SynthCatalog {
 @MainActor
 final class StarterStreamPlayerTests: XCTestCase {
     private func config(_ blend: StarterBlend) -> StarterStreamPlayer.Config {
-        .init(trackIDs: blend.trackIDs, plans: blend.edgePlans, facts: StarterBlendPack.trackFacts)
+        .init(trackIDs: blend.trackIDs, plans: blend.edgePlans)
     }
 
     private func wait(_ player: StarterStreamPlayer, timeout: Double = 10, _ condition: () -> Bool) async throws {
@@ -131,9 +131,8 @@ final class StarterStreamPlayerTests: XCTestCase {
     /// captures what comes out, from 3 s before the plan's overlap until 1 s after the handoff.
     private func runEdge(_ blend: StarterBlend, edge i: Int, factory: SynthCatalog.Factory,
                          host: RecordingStarterHost) async throws -> (StarterStreamPlayer, EdgeRun) {
-        let facts = StarterBlendPack.trackFacts
         let plan = blend.edgePlans[i]
-        let schedule = try XCTUnwrap(plan.schedule(outgoing: facts[plan.outgoingTrackID]!, incoming: facts[plan.incomingTrackID]!))
+        let schedule = try XCTUnwrap(plan.schedule())
         let player = StarterStreamPlayer(config: config(blend), host: host, output: nil, makeSource: factory.make)
         let startSeconds = max(0, schedule.outgoingStart - 3)
         player.start(at: i, seconds: startSeconds)
@@ -178,7 +177,6 @@ final class StarterStreamPlayerTests: XCTestCase {
     }
 
     func testEveryOneOfTheThirtySuppliedEdgesIsExecutedByTheStreamingRenderer() async throws {
-        let facts = StarterBlendPack.trackFacts
         var executed = 0
         for blend in StarterBlendCatalog.blends {
             for i in 0..<5 {
@@ -188,7 +186,7 @@ final class StarterStreamPlayerTests: XCTestCase {
                 let (player, run) = try await runEdge(blend, edge: i, factory: factory, host: host)
                 defer { player.stop() }
                 let label = "\(blend.id) edge \(plan.edge) (\(plan.style.rawValue))"
-                let schedule = try XCTUnwrap(plan.schedule(outgoing: facts[plan.outgoingTrackID]!, incoming: facts[plan.incomingTrackID]!))
+                let schedule = try XCTUnwrap(plan.schedule())
                 let rate = 44_100.0
 
                 // The supplied plan was handed to the renderer and is the style that ran.
@@ -389,16 +387,16 @@ final class StarterStreamPlayerTests: XCTestCase {
 
     func testExtendingASessionSchedulesTheNextEdgeFromCatalogFacts() async throws {
         let blend = StarterBlendCatalog.blends[0]
-        let facts = StarterBlendPack.trackFacts
+        let facts = StarterTestFacts.byID
         let a = blend.trackIDs[0]
         // Any other catalog track the planner accepts after `a`.
-        let candidate = try XCTUnwrap(StarterBlendRuntimeData.tracks.map(\.id).first { id in
+        let candidate = try XCTUnwrap(StarterBlendCatalog.blends.flatMap(\.trackIDs).first { id in
             id != a && CatalogEdgePlanner.plan(blendID: "x", edge: 1, outgoing: facts[a]!, incoming: facts[id]!) != nil
         })
         let plan = try XCTUnwrap(CatalogEdgePlanner.plan(blendID: blend.id, edge: 1, outgoing: facts[a]!, incoming: facts[candidate]!))
         let host = RecordingStarterHost()
         let factory = SynthCatalog.Factory(blend)
-        let single = StarterStreamPlayer.Config(trackIDs: [a], plans: [], facts: facts)
+        let single = StarterStreamPlayer.Config(trackIDs: [a], plans: [])
         let player = StarterStreamPlayer(config: single, host: host, output: nil) { id, token in
             id == candidate ? SynthSource(low: 70, high: 1_300, seconds: 240) : try factory.make(id, token)
         }
@@ -406,17 +404,17 @@ final class StarterStreamPlayerTests: XCTestCase {
         player.start(at: 0, seconds: 30)
         try await wait(player) { !player.isBuffering }
         XCTAssertTrue(host.edges.isEmpty)
-        player.extend(trackIDs: [candidate], plans: [plan], facts: facts)
+        player.extend(trackIDs: [candidate], plans: [plan])
         try await wait(player) { !host.edges.isEmpty }
         XCTAssertEqual(host.edges.first, .scheduled(edge: 1, plan: plan, executed: .bassSwap))
     }
 
     func testRepeatOneOrSleepTimerKeepsTheTrackFromBlendingAndReportsItsEnd() async throws {
-        let facts = StarterBlendPack.trackFacts
+        let facts = StarterTestFacts.byID
         let a = StarterBlendCatalog.blends[0].trackIDs[0], b = StarterBlendCatalog.blends[0].trackIDs[1]
         let host = RecordingStarterHost()
         host.allowBlend = false
-        let short = StarterStreamPlayer.Config(trackIDs: [a, b], plans: [StarterBlendCatalog.blends[0].edgePlans[0]], facts: facts)
+        let short = StarterStreamPlayer.Config(trackIDs: [a, b], plans: [StarterBlendCatalog.blends[0].edgePlans[0]])
         let player = StarterStreamPlayer(config: short, host: host, output: nil) { _, token in
             let s = SynthSource(low: 40, high: 1_000, seconds: 5); token.register { s.cancel() }; return s
         }

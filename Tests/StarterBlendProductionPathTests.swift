@@ -133,7 +133,8 @@ final class StarterBlendProductionPathTests: XCTestCase {
         XCTAssertEqual(snapshot.executedStyle, .bassSwap)
         XCTAssertTrue(snapshot.isTerminal || snapshot.phase == .handedOff)
         XCTAssertNotNil(snapshot.handoffFrame)
-        XCTAssertEqual(player.duration, blend.edgePlans.isEmpty ? 0 : StarterBlendPack.trackFacts[blend.trackIDs[1]]?.durationSeconds ?? 0, accuracy: 0.01)
+        // Starter definitions carry no per-track facts, so the row's duration is whatever the catalog supplied (none here).
+        XCTAssertEqual(player.duration, player.queue[1].track.durationSec ?? 0, accuracy: 0.01)
     }
 
     func testUnavailableAssetFallsBackToSequentialWithoutClaimingABlend() async throws {
@@ -194,6 +195,9 @@ final class StarterBlendProductionPathTests: XCTestCase {
         XCTAssertNil(BlendReplay.starterRequest(for: doc))
     }
 
+    /// Catalog traits of the Deep Focus tail in this fixture (catalog data, not starter-definition data).
+    private nonisolated static let genre = "Electronic", subgenre = "Synthwave"
+
     func testKeepPlayingContinuesFromBlendEligibleCatalogTracksWithoutAModel() async throws {
         let blend = StarterBlendCatalog.blends[1]            // deep-focus: catalog candidates exist after its last track
         let factory = SynthCatalog.Factory(blend)
@@ -201,23 +205,23 @@ final class StarterBlendProductionPathTests: XCTestCase {
         // would (grid, loudness, traits) and add one stored-fact candidate.
         let tailKey = BlendCatalogTrack.key(pack: .v1, trackID: blend.trackIDs.last!)
         let candidateKey = BlendCatalogTrack.key(pack: .v1, trackID: "9000001")
-        let tailFacts = try XCTUnwrap(StarterBlendPack.trackFacts[blend.trackIDs.last!])
+        let tailFacts = try XCTUnwrap(StarterTestFacts.byID[blend.trackIDs.last!])
         try await LibraryStore.shared.dbQueue.write { db in
             var tail = try XCTUnwrap(BlendCatalogTrack.fetchOne(db, key: tailKey))
-            tail.camelotKey = "8A"; tail.genre = blend.genre; tail.subgenre = blend.subgenre
+            tail.camelotKey = "8A"; tail.genre = Self.genre; tail.subgenre = Self.subgenre
             tail.state = .blendEligible; tail.beatPeriod = tailFacts.beatPeriod; tail.beatPhase = tailFacts.beatPhase
             tail.rmsDB = tailFacts.rmsDB; try tail.update(db)
             try BlendCatalogTrack(catalogKey: candidateKey, packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
                                   durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
                                   beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
-                                  genre: blend.genre, subgenre: blend.subgenre, camelotKey: "9A").save(db)
+                                  genre: Self.genre, subgenre: Self.subgenre, camelotKey: "9A").save(db)
             // Same tempo but wrong subgenre / key: must never be chosen.
-            for (suffix, sub, key) in [("2", "Progressive House", "9A"), ("3", blend.subgenre, "3A")] {
+            for (suffix, sub, key) in [("2", "Progressive House", "9A"), ("3", Self.subgenre, "3A")] {
                 try BlendCatalogTrack(catalogKey: "\(StarterBlendPack.v1.releaseTag):900000\(suffix)",
                                       packTag: StarterBlendPack.v1.releaseTag, state: .blendEligible,
                                       durationSeconds: 240, bpm: tailFacts.bpm, beatPeriod: tailFacts.beatPeriod,
                                       beatPhase: 0.2, rmsDB: tailFacts.rmsDB, updatedAt: Date(),
-                                      genre: blend.genre, subgenre: sub, camelotKey: key).save(db)
+                                      genre: Self.genre, subgenre: sub, camelotKey: key).save(db)
             }
         }
         let player = try await start(blend, factory: factory)

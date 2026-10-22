@@ -27,12 +27,6 @@ out.append("// starter-blends-aac-v1 (starter-blend-source.json + starter-transi
 out.append("// Do not edit by hand and do not regenerate with a planner: the plans are authoritative.")
 out.append("import Foundation\n")
 out.append("enum StarterBlendRuntimeData {")
-out.append("    static let tracks: [StarterTrackFacts] = [")
-for tid in order:
-    a = facts[tid]
-    out.append(f'        StarterTrackFacts(id: "{tid}", durationSeconds: {num(a["duration"])}, bpm: {num(a["bpm"])}, '
-               f'beatPeriod: {num(a["period"])}, beatPhase: {num(a["phase"])}, rmsDB: {num(a["rms_db"])}),')
-out.append("    ]\n")
 out.append("    static let edges: [StarterEdgePlan] = [")
 for t in plans["transitions"]:
     p = t["plan"]
@@ -42,9 +36,13 @@ for t in plans["transitions"]:
             f'overlapBeats: {p["overlapBeats"]}']
     for key, kind in (("incomingGain", "d"), ("outgoingSwapBeat", "i"), ("incomingSwapBeat", "i"),
                       ("blendStartSeconds", "d"), ("swapSeconds", "d"), ("blendEndSeconds", "d"),
-                      ("incomingOffsetSeconds", "d"), ("outgoingCutBeat", "i"), ("incomingStartBeat", "i")):
+                      ("incomingOffsetSeconds", "d")):
         if key in p:
             args.append(f"{key}: {num(p[key]) if kind == 'd' else p[key]}")
+    if p["style"] == "phrase-cut":  # beats -> source seconds, once, so the plan is self-contained
+        o, i = facts[t["outgoing"]], facts[t["incoming"]]
+        args.append(f'outgoingStartSeconds: {num(o["phase"] + p["outgoingCutBeat"] * o["period"])}')
+        args.append(f'incomingStartSeconds: {num(i["phase"] + p["incomingStartBeat"] * i["period"])}')
     out.append("        StarterEdgePlan(" + ", ".join(args) + "),")
 out.append("    ]")
 out.append("}")

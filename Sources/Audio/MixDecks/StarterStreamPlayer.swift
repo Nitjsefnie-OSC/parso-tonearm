@@ -188,7 +188,6 @@ final class StarterStreamPlayer {
         var trackIDs: [String]
         /// `plans[i]` joins track `i` to track `i + 1`.
         var plans: [StarterEdgePlan]
-        var facts: [String: StarterTrackFacts]
         var deckSeconds = 8.0
         var startBufferSeconds = 1.0
         var incomingBufferSeconds = 0.75
@@ -331,10 +330,9 @@ final class StarterStreamPlayer {
     }
 
     /// Appends tracks (and the plans joining them) to a session in progress, e.g. Keep Playing.
-    func extend(trackIDs: [String], plans: [StarterEdgePlan], facts: [String: StarterTrackFacts]) {
+    func extend(trackIDs: [String], plans: [StarterEdgePlan]) {
         config.trackIDs += trackIDs
         config.plans += plans
-        config.facts.merge(facts) { current, _ in current }
         reportedFinish = false
         scheduleUpcomingIfNeeded()
     }
@@ -515,10 +513,7 @@ final class StarterStreamPlayer {
         }
         let outgoingTotal = mainSource.totalFrames
         let position = cell.perform { $0.decks[$0.main].currentFrame }
-        let schedule: StarterEdgePlan.Schedule? = {
-            guard let o = config.facts[outgoingID], let i = config.facts[incomingID] else { return nil }
-            return plan.schedule(outgoing: o, incoming: i)
-        }()
+        let schedule = plan.schedule()
         var bounded: BoundedOverlapPlan
         var executed: StarterEdgePlan.Style?
         if let schedule {
