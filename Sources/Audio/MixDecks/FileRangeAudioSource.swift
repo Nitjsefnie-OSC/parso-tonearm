@@ -16,20 +16,23 @@ final class SourceAccessLease: @unchecked Sendable {
     private var scoped: Bool
     private var released = false
 
-    /// `securityScoped`: the URL came from a bookmark.
+    /// `securityScoped`: require a security-scope grant for a bookmark URL.
     init(url: URL, securityScoped: Bool,
          startAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }) throws {
         self.url = url
-        Self.live.add(1, ordering: .relaxed)   // balanced by `release`, which deinit runs even if init throws
         scoped = securityScoped && startAccess(url)
-        // A refusal (or a grant that still leaves the file unreadable) is a denial: never decode.
-        // `startAccessing…` also returns false for a plain file inside the app container.
         guard FileManager.default.fileExists(atPath: url.path) else {
+            // A throwing initializer has no deinit to release a granted scope.
+            if scoped { url.stopAccessingSecurityScopedResource() }
             throw MixTrackLoaderError.fileMissing
+        }
+        guard !securityScoped || scoped else {
+            throw MixTrackLoaderError.accessDenied
         }
         guard FileManager.default.isReadableFile(atPath: url.path) else {
             throw MixTrackLoaderError.accessDenied
         }
+        Self.live.add(1, ordering: .relaxed)   // only successful leases are balanced by `release`
     }
 
     func release() {
