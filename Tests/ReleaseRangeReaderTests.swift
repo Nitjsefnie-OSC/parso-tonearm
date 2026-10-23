@@ -68,6 +68,43 @@ final class ReleaseRangeReaderTests: XCTestCase {
         XCTAssertTrue(t.requestRanges.allSatisfy { $0.count <= 1_024 }, "never a whole-file request")
     }
 
+    func testRangeRequestAsksForIdentityEncoding() {
+        let request = URLSessionRangeTransport.makeRequest(url: URL(string: "https://example.test/a.m4a")!, range: 0...99)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept-Encoding"), "identity")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=0-99")
+    }
+
+    func testEncodedPartialResponsesAreRejectedWithoutCachingOrRetry() {
+        for encoding in ["gzip", "br", "deflate", "GZIP"] {
+            let data = blob(5_000)
+            let t = StubRangeTransport(blob: data)
+            t.override = { _, range in
+                let last = min(range.upperBound, Int64(data.count) - 1)
+                return (data.subdata(in: Int(range.lowerBound)..<Int(last + 1)),
+                        t.response(status: 206, headers: ["Content-Range": "bytes \(range.lowerBound)-\(last)/\(data.count)",
+                                                          "Content-Encoding": encoding]))
+            }
+            let r = reader(t)
+            XCTAssertThrowsError(try r.totalLength(), encoding) {
+                XCTAssertEqual(($0 as? ReleaseRangeError)?.isRetryable, false)
+            }
+            XCTAssertEqual(t.requestRanges.count, 1, "\(encoding) is not retried")
+            XCTAssertEqual(r.cachedBytes, 0)
+        }
+    }
+
+    func testIdentityContentEncodingIsAccepted() throws {
+        let data = blob(2_000)
+        let t = StubRangeTransport(blob: data)
+        t.override = { _, range in
+            let last = min(range.upperBound, Int64(data.count) - 1)
+            return (data.subdata(in: Int(range.lowerBound)..<Int(last + 1)),
+                    t.response(status: 206, headers: ["Content-Range": "bytes \(range.lowerBound)-\(last)/\(data.count)",
+                                                      "Content-Encoding": "identity"]))
+        }
+        XCTAssertEqual(try reader(t).read(offset: 0, count: 100), data.subdata(in: 0..<100))
+    }
+
     func testParseContentRange() {
         XCTAssertEqual(ReleaseRangeReader.parseContentRange("bytes 0-99/1000")?.total, 1000)
         XCTAssertNil(ReleaseRangeReader.parseContentRange("bytes */1000"))

@@ -43,9 +43,16 @@ final class URLSessionRangeTransport: RangeTransport, @unchecked Sendable {
 
     init(session: URLSession = URLSession(configuration: .ephemeral)) { self.session = session }
 
-    func fetch(url: URL, range: ClosedRange<Int64>) throws -> (data: Data, response: HTTPURLResponse) {
+    /// Asks for identity encoding so byte offsets and body length mean the same thing.
+    static func makeRequest(url: URL, range: ClosedRange<Int64>) -> URLRequest {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        return request
+    }
+
+    func fetch(url: URL, range: ClosedRange<Int64>) throws -> (data: Data, response: HTTPURLResponse) {
+        let request = Self.makeRequest(url: url, range: range)
         let box = Mutex<Result<(Data, HTTPURLResponse), any Error>?>(nil)
         let done = DispatchSemaphore(value: 0)
         let task = session.dataTask(with: request) { data, response, error in
@@ -208,6 +215,10 @@ final class ReleaseRangeReader: @unchecked Sendable {
         case 416: throw ReleaseRangeError.permanent("range not satisfiable")
         case 408, 425, 429, 500...599: throw ReleaseRangeError.transient("HTTP \(response.statusCode)")
         default: throw ReleaseRangeError.permanent("HTTP \(response.statusCode)")
+        }
+        if let encoding = response.value(forHTTPHeaderField: "Content-Encoding")?
+            .trimmingCharacters(in: .whitespaces).lowercased(), !encoding.isEmpty, encoding != "identity" {
+            throw ReleaseRangeError.permanent("encoded range response (\(encoding))")
         }
         guard let header = response.value(forHTTPHeaderField: "Content-Range"),
               let parsed = Self.parseContentRange(header) else {
