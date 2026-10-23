@@ -183,5 +183,17 @@ final class BoundedLiveLoaderTests: XCTestCase {
         }
         XCTAssertEqual(SourceAccessLease.activeCount, baseline)
     }
+
+    func testGrantedScopeForUnreadableFileThrowsAndLeaseCountBalances() throws {
+        let url = try tone("granted-unreadable.wav", seconds: 1)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
+        try XCTSkipIf(FileManager.default.isReadableFile(atPath: url.path), "File permissions do not prevent this user from reading")
+        let baseline = SourceAccessLease.activeCount
+        XCTAssertThrowsError(try SourceAccessLease(url: url, securityScoped: true, startAccess: { _ in true })) {
+            XCTAssertEqual($0 as? MixTrackLoaderError, .accessDenied)
+        }
+        XCTAssertEqual(SourceAccessLease.activeCount, baseline)
+    }
 }
 #endif

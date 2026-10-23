@@ -4,9 +4,10 @@ import Foundation
 import ParsoAudioCore
 import Synchronization
 
-/// Scoped access to one local file for as long as a decode needs it. Acquired before any read and
-/// released exactly once (explicitly or on deinit). A denied security scope throws: nothing is
-/// decoded afterwards. `activeCount` is the measurable lease count.
+/// Scoped access to one local file for as long as a decode needs it. A required scope denial
+/// throws before decoding. Every stored property is initialized before validation, so a thrown
+/// initializer runs deinit and `release()`, balancing `activeCount` and stopping a granted scope
+/// exactly once. Successful leases release explicitly or on deinit.
 final class SourceAccessLease: @unchecked Sendable {
     private static let live = Atomic<Int>(0)
     static var activeCount: Int { live.load(ordering: .relaxed) }
@@ -17,13 +18,13 @@ final class SourceAccessLease: @unchecked Sendable {
     private var released = false
 
     /// `securityScoped`: require a security-scope grant for a bookmark URL.
+    /// Every guard runs after full initialization, so deinit releases even when a guard throws.
     init(url: URL, securityScoped: Bool,
          startAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }) throws {
         self.url = url
+        Self.live.add(1, ordering: .relaxed)   // balanced by `release`, which deinit runs even if init throws
         scoped = securityScoped && startAccess(url)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            // A throwing initializer has no deinit to release a granted scope.
-            if scoped { url.stopAccessingSecurityScopedResource() }
             throw MixTrackLoaderError.fileMissing
         }
         guard !securityScoped || scoped else {
@@ -32,7 +33,6 @@ final class SourceAccessLease: @unchecked Sendable {
         guard FileManager.default.isReadableFile(atPath: url.path) else {
             throw MixTrackLoaderError.accessDenied
         }
-        Self.live.add(1, ordering: .relaxed)   // only successful leases are balanced by `release`
     }
 
     func release() {
