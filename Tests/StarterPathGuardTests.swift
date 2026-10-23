@@ -17,6 +17,28 @@ final class StarterPathGuardTests: XCTestCase {
         "Sources/Remote/StarterBlendPlayback.swift"
     ]
 
+    func testReleaseIsAACOnlyAndNoShippingSourceNeedsDeletedJSON() throws {
+        for id in StarterBlendCatalog.starterTrackIDs {
+            let url = try XCTUnwrap(StarterBlendPack.v1.assetURL(trackID: id))
+            XCTAssertEqual(url.pathExtension, "m4a", "\(id) must be an AAC asset")
+            XCTAssertTrue(StarterBlendPack.v1.owns(url))
+        }
+        let deleted = ["starter-blend-source.json", "starter-transition-candidates.json"]
+        for dir in ["Sources", "tools"] {
+            let root = repo.appendingPathComponent(dir)
+            let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+            for case let file as URL in files ?? FileManager.default.enumerator(atPath: "")! {
+                guard ["swift", "py", "sh"].contains(file.pathExtension),
+                      let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                // The generator may name them only to refuse them.
+                if file.lastPathComponent == "generate-runtime-data.py" { continue }
+                for name in deleted {
+                    XCTAssertFalse(text.contains(name), "\(file.lastPathComponent) references removed release asset \(name)")
+                }
+            }
+        }
+    }
+
     func testStarterSourcesNeverTouchTheWholeFilePaths() throws {
         let forbidden = ["MixTrackLoader", "MixTrackAudio", "PCMBuffer", "AVAudioFile", "FileHandle",
                          "createFile", "temporaryDirectory", "NSTemporaryDirectory", "URLSession.shared.download",

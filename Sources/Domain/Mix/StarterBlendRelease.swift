@@ -47,8 +47,8 @@ public struct StarterTrackFacts: Codable, Sendable, Equatable {
     public func beatTime(_ beat: Int) -> Double { beatPhase + Double(beat) * beatPeriod }
 }
 
-/// One adjacent edge's concrete, precomputed plan, copied verbatim from the release's
-/// `starter-transition-candidates.json`. No runtime planner exists: playback executes these values.
+/// One adjacent edge's concrete, precomputed plan, copied verbatim from the source-controlled
+/// supplied edge plans (`StarterBlendRuntimeData`); the release carries only AAC bytes. No runtime planner exists: playback executes these values.
 public struct StarterEdgePlan: Codable, Sendable, Equatable {
     public enum Style: String, Codable, Sendable, Equatable {
         case bassSwap = "bass-swap"
