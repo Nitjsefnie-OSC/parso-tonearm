@@ -1,0 +1,93 @@
+name: osc-manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Ref (branch, tag or SHA) to check out and test"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osc-manual-${{ github.repository }}-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate target ref
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          node <<'NODE'
+          const value = process.env.TARGET_REF ?? "";
+          if (value === "" || value.trim() !== value) {
+            console.error("::error::target_ref must not be empty or have leading/trailing whitespace");
+            process.exit(1);
+          }
+          NODE
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: "${{ github.repository }}"
+          ref: "${{ inputs.target_ref }}"
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out SHA
+        run: |
+          sha="$(git rev-parse HEAD)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::checkout did not resolve to a lowercase 40-character SHA"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$sha"
+
+      - name: Select latest Xcode
+        run: |
+          XCODE=$(ls /Applications/ | grep "^Xcode_" | sort -V | tail -1)
+          sudo xcode-select -s /Applications/$XCODE
+          xcodebuild -version
+
+      - name: Accept Xcode License
+        run: sudo xcodebuild -license accept
+
+      # The guards script greps with ripgrep, which the macOS runner image lacks.
+      - name: Install ripgrep
+        run: brew install ripgrep
+
+      - name: Structural guards
+        run: bash scripts/check-ci-guards.sh
+
+      - name: Cache SPM
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.swiftpm
+            ~/Library/Developer/Xcode/DerivedData/*/SourcePackages
+          key: spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-
+
+      - name: Fetch Mood Starter databases
+        run: make starter
+
+      - name: Run Swift Package Tests
+        run: |
+          set -eo pipefail
+          swift test 2>&1 | tee test.log
+
+      - name: Upload Test Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-logs
+          path: test.log
+          retention-days: 7
